@@ -1,5 +1,8 @@
 import { aggregateOrder, isApiFill, normalize, parseFill, pm, type Fill, type PmEnv, type Row } from './polymarket';
 import { recordMarkets, settleMarkets } from './recorder';
+import { bankroll } from './paper';
+import { RISK_LADDER, drawdownScale, riskLimits } from './fairvalue';
+import { readiness } from './ready';
 export { LiveFeed } from './live';
 export { CryptoFeed } from './crypto';
 
@@ -11,7 +14,9 @@ interface Env extends PmEnv {
   BOT_ALLOCATION?: string;  // the bot's bankroll in dollars, set by Aaron only (default 100)
   BOT_MAX_BET?: string;     // Aaron's cap per bet in dollars (none by default; bets grow with the account)
   BTC_STREAM?: string;      // "off" turns the live bitcoin streams off
-  LIVE_TRADING?: string;    // must equal "on" before the bot may place real orders (default off)
+  LIVE_STRATEGY?: string;   // which bitcoin strategy trades real money (default crypto_fair_v1)
+  SPORTS?: string;          // "on" brings back the sports feed, recorder and basketball paper traders (off: bitcoin only)
+  LIVE_TRADING?: string;    // "on" lets the bot place real orders with its live account (Aaron sets it; default off)
   DASH_PASSWORD?: string;   // wrangler secret put DASH_PASSWORD
   SESSION_SECRET?: string;  // wrangler secret put SESSION_SECRET (any long random string)
 }
@@ -40,7 +45,7 @@ export default {
       if (url.pathname === '/api/state' && req.method === 'GET') return json(await state(env));
       if (url.pathname === '/api/sync' && req.method === 'POST') return json(await sync(env));
       if (url.pathname === '/api/bot' && req.method === 'GET') return json(await bot(env));
-      if (url.pathname === '/api/bot/curve' && req.method === 'GET') return json(await botCurve(env, url.searchParams.get('range') || '1d'));
+      if (url.pathname === '/api/bot/curve' && req.method === 'GET') return json(await botCurve(env, url.searchParams.get('range') || '1d', url.searchParams.get('mode') === 'live' ? 'live' : 'paper'));
       if (url.pathname === '/api/paper') {
         if (req.method === 'GET') return json(await listPaper(env));
         if (req.method === 'POST') return json(await addPaper(env, await req.json()));
@@ -60,20 +65,26 @@ export default {
     return res;
   },
 
-  // Cron runs every minute. The recorder runs every time (it only writes when a live or
-  // soon-to-start game's price moved). Account sync and settlement run every 15 minutes.
+  // Cron runs every minute: keep the bitcoin engine's loop alive. Account sync every 15 minutes.
+  // Sports (the live game feed, the minute price recorder, game settlement) only with SPORTS=on;
+  // the bot trades bitcoin only.
   async scheduled(evt: ScheduledController, env: Env, ctx: ExecutionContext) {
     const now = new Date(evt.scheduledTime);
     const fullTick = now.getUTCMinutes() % 15 === 0;
-    // Keep the live feed's 5-second loop alive (it sleeps itself when no game is on).
-    ctx.waitUntil(env.LIVE.get(env.LIVE.idFromName('live')).fetch('https://live/kick').catch(() => undefined));
+    const sports = env.SPORTS === 'on';
     ctx.waitUntil(env.CRYPTO.get(env.CRYPTO.idFromName('btc')).fetch('https://crypto/kick').catch(() => undefined));
+    // The live feed is told on every tick: with sports off it clears its own alarm and stays asleep.
+    ctx.waitUntil(env.LIVE.get(env.LIVE.idFromName('live')).fetch('https://live/kick').catch(() => undefined));
     ctx.waitUntil((async () => {
-      try { await recordMarkets(env, now, fullTick); }
-      catch (e: any) { if (fullTick) await logSync(env, false, 0, `recorder: ${e?.message || e}`); }
+      if (sports) {
+        try { await recordMarkets(env, now, fullTick); }
+        catch (e: any) { if (fullTick) await logSync(env, false, 0, `recorder: ${e?.message || e}`); }
+      }
       if (!fullTick) return;
-      try { await settleMarkets(env, now); }
-      catch (e: any) { await logSync(env, false, 0, `settle: ${e?.message || e}`); }
+      if (sports) {
+        try { await settleMarkets(env, now); }
+        catch (e: any) { await logSync(env, false, 0, `settle: ${e?.message || e}`); }
+      }
       await sync(env).catch((e) => logSync(env, false, 0, String(e?.message || e)));
     })());
   },
@@ -119,7 +130,14 @@ async function state(env: Env) {
       // Live streams: updates per second over the last minute (0 = down), fresh within 3 minutes.
       stream: fresh(S.pm_stream) ? S.pm_stream.n / 10 : 0,
       ticker: fresh(S.cb_stream) ? S.cb_stream.n / 10 : 0,
+      kraken: fresh(S.kr_stream) ? S.kr_stream.n / 10 : 0,
       volScale: S.btc_mult ? S.btc_mult.n / 100 : 1,
+      trust: S.btc_trust ? S.btc_trust.n / 100 : 0.5,
+      skipped: S.gap_skips?.n ?? 0,
+    },
+    money: {
+      on: env.LIVE_TRADING === 'on', strategy: env.LIVE_STRATEGY || 'crypto_fair_v1', sports: env.SPORTS === 'on',
+      last: await env.DB.prepare('SELECT ts, kind, detail FROM live_events ORDER BY ts DESC LIMIT 1').first<{ ts: number; kind: string; detail: string }>().catch(() => null),
     },
     snapshot: snap ? { t: snap.t, cash: snap.cash, positions: snap.positions, portfolio: snap.portfolio, reserved: snap.reserved } : null,
     lastSync: last ? { t: last.t, ok: !!last.ok, added: last.added, msg: last.msg } : null,
@@ -131,48 +149,86 @@ async function state(env: Env) {
 
 async function bot(env: Env) {
   const allocation = Number(env.BOT_ALLOCATION || 100) || 100;
-  const mode = env.LIVE_TRADING === 'on' ? 'live' : 'paper';
+  const liveOn = env.LIVE_TRADING === 'on';
+  const sports = env.SPORTS === 'on';
   const q = async <T>(sql: string, ...args: unknown[]): Promise<T[]> =>
     (await env.DB.prepare(sql).bind(...args).all<T>().catch(() => ({ results: [] as T[] }))).results;
+  // With sports off, the paper side shows bitcoin only (old basketball rows stay in the database).
+  const scope = sports ? '' : " AND strategy LIKE 'crypto_%'";
 
-  const open = await q<any>("SELECT * FROM bot_positions WHERE mode = ? AND status = 'open' ORDER BY opened_at DESC LIMIT 50", mode);
-  const history = await q<any>("SELECT * FROM bot_positions WHERE mode = ? AND status != 'open' ORDER BY closed_at DESC LIMIT 100", mode);
-  const totals = (await q<{ realized: number | null; n: number; wins: number }>(
-    "SELECT SUM(pnl) AS realized, COUNT(*) AS n, SUM(pnl > 0) AS wins FROM bot_positions WHERE mode = ? AND status != 'open'", mode))[0];
+  // One account's view: open positions marked at what they'd sell for, history, totals.
+  const block = async (mode: 'paper' | 'live') => {
+    const open = await q<any>(`SELECT * FROM bot_positions WHERE mode = ? AND status = 'open'${scope} ORDER BY opened_at DESC LIMIT 50`, mode);
+    const history = await q<any>(`SELECT * FROM bot_positions WHERE mode = ? AND status != 'open'${scope} ORDER BY closed_at DESC LIMIT 100`, mode);
+    const totals = (await q<{ realized: number | null; n: number; wins: number }>(
+      `SELECT SUM(pnl) AS realized, COUNT(*) AS n, SUM(pnl > 0) AS wins FROM bot_positions WHERE mode = ? AND status != 'open'${scope}`, mode))[0];
+    let unrealized = 0, atRisk = 0;
+    const positions = [];
+    for (const p of open) {
+      const t = (await q<{ bid: number | null; ask: number | null; ts: number }>(
+        'SELECT bid, ask, ts FROM ticks WHERE slug = ? ORDER BY ts DESC LIMIT 1', p.market_slug))[0];
+      const exit = t ? (p.side === 'long' ? t.bid : t.ask != null ? 1 - t.ask : null) : null;
+      const value = exit != null ? exit * (p.qty || 0) : null;
+      const netIn = (p.cost || 0) - (p.proceeds || 0);
+      const upnl = value != null ? value - netIn : null;
+      if (upnl != null) unrealized += upnl;
+      atRisk += Math.max(0, netIn);
+      const orders = await q<any>('SELECT ts, action, price, qty, filled_qty, avg_fill, fee, status, reason, exchange_order_id FROM bot_orders WHERE position_id = ? ORDER BY ts', p.id);
+      positions.push({ ...p, price: exit, priceAt: t?.ts ?? null, value, upnl, orders });
+    }
+    const realized = totals?.realized || 0;
+    return {
+      realized, unrealized, atRisk,
+      equity: allocation + realized + unrealized,
+      available: Math.max(0, allocation + realized - atRisk),
+      record: { closed: totals?.n || 0, wins: totals?.wins || 0 },
+      positions, history,
+    };
+  };
 
-  // Live price for each open position, and its orders (adds, the resting take-profit).
-  let unrealized = 0, atRisk = 0;
-  const positions = [];
-  for (const p of open) {
-    const t = (await q<{ bid: number | null; ask: number | null; ts: number }>(
-      'SELECT bid, ask, ts FROM ticks WHERE slug = ? ORDER BY ts DESC LIMIT 1', p.market_slug))[0];
-    const exit = t ? (p.side === 'long' ? t.bid : t.ask != null ? 1 - t.ask : null) : null;
-    const value = exit != null ? exit * (p.qty || 0) : null;
-    const netIn = (p.cost || 0) - (p.proceeds || 0);
-    const upnl = value != null ? value - netIn : null;
-    if (upnl != null) unrealized += upnl;
-    atRisk += Math.max(0, netIn);
-    const orders = await q<any>('SELECT ts, action, price, qty, status, reason FROM bot_orders WHERE position_id = ? ORDER BY ts', p.id);
-    positions.push({ ...p, price: exit, priceAt: t?.ts ?? null, value, upnl, orders });
-  }
-  const realized = totals?.realized || 0;
+  const paper = await block('paper');
+  const anyLive = (await q<{ n: number }>("SELECT COUNT(*) AS n FROM bot_positions WHERE mode = 'live'"))[0]?.n || 0;
+  const events = await q<any>('SELECT ts, kind, slug, detail FROM live_events ORDER BY ts DESC LIMIT 40');
+  const live = liveOn || anyLive || events.length
+    ? { on: liveOn, strategy: env.LIVE_STRATEGY || 'crypto_fair_v1', ...(await block('live')), events }
+    : null;
   const byStrategy = await q<any>(`SELECT strategy,
       SUM(status != 'open') AS closed, SUM(status != 'open' AND pnl > 0) AS wins, SUM(status = 'open') AS open,
       COALESCE(SUM(CASE WHEN status != 'open' THEN pnl END), 0) AS pnl,
       COALESCE(SUM(CASE WHEN status != 'open' THEN cost END), 0) AS staked
-    FROM bot_positions WHERE mode = ? GROUP BY strategy ORDER BY strategy`, mode);
+    FROM bot_positions WHERE mode = 'paper'${scope} GROUP BY strategy ORDER BY strategy`);
   const signals = await q<any>(`SELECT s.slug, s.ts, s.kind, s.side, s.price, s.ref, s.detail, m.title, m.league
-    FROM signals s LEFT JOIN markets m ON m.slug = s.slug ORDER BY s.ts DESC LIMIT 30`);
-  // The bitcoin model's latest self-grading (written by the crypto feed every half hour).
-  const brain = (await q<{ v: string; at: number }>("SELECT v, at FROM brain WHERE k = 'btc_model'"))[0];
-  let model = null;
-  try { model = brain ? { ...JSON.parse(brain.v), at: brain.at } : null; } catch {}
+    FROM signals s LEFT JOIN markets m ON m.slug = s.slug ${sports ? '' : "WHERE s.slug LIKE 'cpc-btc-%'"} ORDER BY s.ts DESC LIMIT 30`);
+  // What the bitcoin model has learned: its latest self-grading (every half hour), each exchange's
+  // offset to the official index (every window start), and the trades the data check refused.
+  const brainRows = await q<{ k: string; v: string; at: number }>("SELECT k, v, at FROM brain WHERE k IN ('btc_model', 'btc_basis')");
+  const fromBrain = (k: string) => {
+    const r = brainRows.find((x) => x.k === k);
+    try { return r ? { ...JSON.parse(r.v), at: r.at } : null; } catch { return null; }
+  };
+  const graded = fromBrain('btc_model'), basis = fromBrain('btc_basis');
+  const skips = (await q<{ n: number }>("SELECT n FROM stats WHERE k = 'gap_skips'"))[0]?.n || 0;
+  const model = { ...(graded || {}), basis, skips };
+
+  // Ready for real money? The record of the strategy that would trade it, on the fixed engine
+  // (trades carrying the feed record, Nov 22 on), plus the grading's verdict on the math.
+  const liveId = env.LIVE_STRATEGY || 'crypto_fair_v1';
+  const readyRows = await q<{ pnl: number; cost: number }>(`SELECT pnl, cost FROM bot_positions
+    WHERE mode = 'paper' AND strategy = ? AND status != 'open' AND json_extract(meta, '$.feeds') IS NOT NULL ORDER BY closed_at`, liveId);
+  const ready = { strategy: liveId, ...readiness(readyRows, allocation, graded) };
+
+  // Where that account sits on the risk ladder right now (the live account once it trades).
+  const acct = await bankroll(env.DB, allocation, Date.now(), live?.record?.closed ? undefined : liveId, live?.record?.closed ? 'live' : 'paper');
+  const lim = riskLimits(acct.peak);
+  const risk = {
+    account: live?.record?.closed ? 'live' : 'paper', equity: acct.equity, peak: acct.peak, openNet: acct.openNet,
+    floor: acct.peak * (1 - lim.dd), scale: drawdownScale(acct.equity, acct.peak, lim.dd), ...lim,
+    ladder: RISK_LADDER,
+  };
   return {
-    mode, allocation, realized, unrealized, atRisk, model,
-    equity: allocation + realized + unrealized,
-    available: Math.max(0, allocation + realized - atRisk),
-    record: { closed: totals?.n || 0, wins: totals?.wins || 0 },
-    positions, history, signals, byStrategy,
+    mode: liveOn ? 'live' : 'paper', allocation, sports, model, live, ready, risk,
+    // The paper accounts (top level, as before)
+    ...paper, signals, byStrategy,
   };
 }
 
@@ -182,8 +238,7 @@ async function bot(env: Env) {
 const SPANS: Record<string, number> = { '1h': 3_600_000, '1d': 86_400_000, '1w': 7 * 86_400_000 };
 const groupOf = (strategy: string | null) => (strategy?.startsWith('crypto_') ? 'btc' : strategy?.startsWith('hoops_') ? 'hoops' : 'other');
 
-async function botCurve(env: Env, range: string) {
-  const mode = env.LIVE_TRADING === 'on' ? 'live' : 'paper';
+async function botCurve(env: Env, range: string, mode: 'paper' | 'live') {
   const now = Date.now();
   let from = SPANS[range] ? now - SPANS[range] : 0;
   const rows = (await env.DB.prepare("SELECT closed_at AS t, pnl, strategy FROM bot_positions WHERE mode = ? AND status != 'open' AND closed_at >= ? ORDER BY closed_at")

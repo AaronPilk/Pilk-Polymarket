@@ -121,28 +121,73 @@ export function kellyStake(fair: number, price: number, bankroll: number, fracti
   return bankroll * fraction * ((p - price) / (1 - price));
 }
 
-// Bet size that grows with the account. Kelly sizing on the current account (starting money plus
-// everything won or lost so far), so a $100 account that has grown to $10,000 bets a hundred times
-// bigger, and a losing streak shrinks the bets on its own. Capped at:
-//   maxShare  a share of the account per bet (a sixth: $16.67 at $100, $1,667 at $10K)
+// The risk ladder: the most the bot may put at risk, by the size of the account's peak. A small
+// account swings bigger to grow; a big one protects what it built. Between the listed sizes it
+// slides smoothly (on a log scale), so nothing jumps at $1,000.
+//   peak       one bet   all open bets   gives back from its peak   day stop
+//   $100       10%       30%             50%                        25%
+//   $1,000      8%       25%             40%                        20%
+//   $10,000     4%       15%             30%                        15%
+//   $100,000    1.5%      8%             20%                        10%
+// "Gives back" is a floor under the peak: as the account falls toward it, every bet shrinks in
+// step (half way down, half size), so a bad run can't dig a hole it takes weeks to climb out of,
+// and at the peak nothing holds the bot back.
+export const RISK_LADDER = [
+  { at: 100, bet: 0.10, open: 0.30, dd: 0.50, day: 0.25 },
+  { at: 1_000, bet: 0.08, open: 0.25, dd: 0.40, day: 0.20 },
+  { at: 10_000, bet: 0.04, open: 0.15, dd: 0.30, day: 0.15 },
+  { at: 100_000, bet: 0.015, open: 0.08, dd: 0.20, day: 0.10 },
+];
+export interface RiskLimits { bet: number; open: number; dd: number; day: number }
+
+export function riskLimits(peak: number): RiskLimits {
+  const L = RISK_LADDER, pick = ({ bet, open, dd, day }: RiskLimits) => ({ bet, open, dd, day });
+  if (!(peak > L[0].at)) return pick(L[0]);
+  if (peak >= L[L.length - 1].at) return pick(L[L.length - 1]);
+  let i = 0;
+  while (peak >= L[i + 1].at) i++;
+  const a = L[i], b = L[i + 1];
+  const t = (Math.log10(peak) - Math.log10(a.at)) / (Math.log10(b.at) - Math.log10(a.at));
+  const mix = (x: number, y: number) => x + t * (y - x);
+  return { bet: mix(a.bet, b.bet), open: mix(a.open, b.open), dd: mix(a.dd, b.dd), day: mix(a.day, b.day) };
+}
+
+// 1 at the peak, falling in a straight line to 0 at the floor (peak minus its allowed giveback).
+export function drawdownScale(equity: number, peak: number, dd: number): number {
+  if (!(peak > 0) || equity >= peak) return 1;
+  const floor = peak * (1 - dd);
+  return Math.max(0, Math.min(1, (equity - floor) / (peak - floor)));
+}
+
+// Bet size that grows with the account. Kelly on the current account (starting money plus
+// everything won or lost so far) is the risk-to-reward math: it bets more when the payout is
+// good for the chance of losing, nothing when it isn't, and `trust` (learned by the grading)
+// decides how much of the math's edge to believe. Then:
+//   drawdown  below its peak, the bet shrinks toward zero at the floor (see the ladder)
+//   one bet   at most the ladder's share of the account
+//   open      all open bets together stay under the ladder's share
 //   depth     a quarter of the contracts offered at the best price, when known, so a big account
 //             never tries to buy more than the market can fill
 //   available what isn't already tied up in open positions
-//   ceiling   Aaron's own cap per bet (BOT_MAX_BET), when he's set one
+//   ceiling   Aaron's BOT_MAX_BET when he sets one, over everything
 export function stakeFor(o: {
   fair: number; price: number; equity: number; available: number;
   fraction?: number; trust?: number; maxShare?: number; depth?: number | null; ceiling?: number | null;
+  peak?: number; openNet?: number;
 }): number {
-  const k = kellyStake(o.fair, o.price, o.equity, o.fraction ?? 0.25, o.trust ?? 0.5);
-  let cap = Math.min(o.equity * (o.maxShare ?? 1 / 6), o.available);
+  const peak = Math.max(o.peak ?? o.equity, o.equity);
+  const lim = riskLimits(peak);
+  const k = kellyStake(o.fair, o.price, o.equity, o.fraction ?? 0.25, o.trust ?? 0.5) * drawdownScale(o.equity, peak, lim.dd);
+  let cap = Math.min(o.equity * (o.maxShare ?? lim.bet), o.available);
+  if (o.openNet != null) cap = Math.min(cap, Math.max(0, o.equity * lim.open - o.openNet));
   if (o.depth != null && o.depth > 0) cap = Math.min(cap, o.depth * o.price * 0.25);
   if (o.ceiling != null && o.ceiling > 0) cap = Math.min(cap, o.ceiling);
   return Math.max(0, Math.min(k, cap));
 }
 
-// Stop for the day after losing a third of what the account started the day with ($33 on $100),
-// so the stop scales with the account too.
-export function dailyStopHit(equity: number, today: number): boolean {
+// Stop for the day after losing the ladder's day share of what the account started the day with
+// ($25 on $100, $10,000 on $100,000), so the stop scales with the account too.
+export function dailyStopHit(equity: number, today: number, peak = equity): boolean {
   const startOfDay = equity - today;
-  return today <= -Math.max(1, startOfDay / 3);
+  return today <= -Math.max(1, startOfDay * riskLimits(Math.max(peak, startOfDay)).day);
 }

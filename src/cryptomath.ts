@@ -48,6 +48,14 @@ export function windowEnd(slug: string): number | null {
   return parseWindow(slug)?.end ?? null;
 }
 
+// One step of an exchange's learned offset to the official index. The first few official prices
+// are plain-averaged (so one odd reading doesn't set it), after that each new one moves it `alpha`
+// of the way: recent enough to follow a drifting exchange, smooth enough to ignore one noisy minute.
+export function learnOffset(prev: number, n: number, gap: number, alpha = 0.3): number {
+  const a = n < 3 ? 1 / (n + 1) : alpha;
+  return prev + a * (gap - prev);
+}
+
 // ---------- grading the math against what happened
 
 // Log loss of a probability call against a 0/1 result, clipped at 1%/99% so one confident miss
@@ -68,6 +76,10 @@ export interface Mark {
 // up to twice what the last 15 minutes showed, and the grading decides who's right.
 export const SIGMA_GRID = [0.7, 0.8, 0.9, 1, 1.1, 1.25, 1.4, 1.6, 1.8, 2, 2.3, 2.6];
 
+// How much of the math to believe over the market: the bot's probability for sizing is
+// market + trust × (math − market). 0 = the market is always right, 1 = only the math counts.
+export const TRUST_GRID = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1];
+
 interface Bucket { lo: number; n: number; p: number; hit: number }
 const emptyBuckets = (): Bucket[] => Array.from({ length: 10 }, (_, i) => ({ lo: i / 10, n: 0, p: 0, hit: 0 }));
 const addBucket = (b: Bucket[], p: number, y: number, w: number) => {
@@ -84,11 +96,14 @@ const finishBuckets = (b: Bucket[]) => b.filter((k) => k.n > 0)
 //   grid             log loss if volatility had been scaled by each multiplier
 //   next             the scale to use: the best one, but only moving off `current` when it
 //                    scores at least 0.2% better, so the setting doesn't twitch on noise
+//   blend / trust    log loss of market + w × (math − market) for each w, the best w, and
+//                    trustNext: that w under the same 0.2% rule against `currentTrust`
 //   buckets          calibration: when the math said 60-70%, how often did Up happen
-export function gradeModel(marks: Mark[], current = 1) {
+export function gradeModel(marks: Mark[], current = 1, currentTrust = 0.5) {
   const perWindow = new Map<string, number>();
   for (const m of marks) perWindow.set(m.slug, (perWindow.get(m.slug) || 0) + 1);
   const grid = SIGMA_GRID.map((mult) => ({ mult, loss: 0 }));
+  const blend = TRUST_GRID.map((w) => ({ w, loss: 0 }));
   const series = new Map<string, { w: number; model: number; market: number }>();
   const buckets = emptyBuckets(), marketBuckets = emptyBuckets();
   let wAll = 0, wPair = 0, model = 0, market = 0;
@@ -106,6 +121,7 @@ export function gradeModel(marks: Mark[], current = 1) {
       wPair += w;
       model += w * logLoss(m.fair, y);
       market += w * logLoss(mid, y);
+      for (const b of blend) b.loss += w * logLoss(mid + b.w * (m.fair - mid), y);
       addBucket(marketBuckets, mid, y, w);
       const s = parseWindow(m.slug)?.series || 'other';
       const row = series.get(s) || { w: 0, model: 0, market: 0 };
@@ -118,10 +134,15 @@ export function gradeModel(marks: Mark[], current = 1) {
   const best = scored.reduce((a, b) => (b.loss != null && (a.loss == null || b.loss < a.loss) ? b : a), scored[0]);
   const cur = scored.find((g) => g.mult === current) || scored.find((g) => g.mult === 1)!;
   const next = best.loss != null && cur.loss != null && best.loss < cur.loss * 0.998 ? best.mult : current;
+  const blendScored = blend.map((b) => ({ w: b.w, loss: wPair ? r4(b.loss / wPair) : null }));
+  const bestW = blendScored.reduce((a, b) => (b.loss != null && (a.loss == null || b.loss < a.loss) ? b : a), blendScored[0]);
+  const curW = blendScored.reduce((a, b) => (Math.abs(b.w - currentTrust) < Math.abs(a.w - currentTrust) ? b : a), blendScored[0]);
+  const trustNext = bestW.loss != null && curW.loss != null && bestW.loss < curW.loss * 0.998 ? bestW.w : currentTrust;
   return {
     windows: perWindow.size, marks: marks.length,
     modelLoss: wPair ? r4(model / wPair) : null, marketLoss: wPair ? r4(market / wPair) : null, paired: Math.round(wPair),
     grid: scored, best: best.mult, next,
+    blend: blendScored, trustBest: bestW.w, trustNext,
     bySeries: Object.fromEntries([...series].map(([k, v]) => [k, { windows: Math.round(v.w), model: r4(v.model / v.w), market: r4(v.market / v.w) }])),
     buckets: finishBuckets(buckets), marketBuckets: finishBuckets(marketBuckets),
   };

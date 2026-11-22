@@ -144,7 +144,8 @@ CREATE TABLE IF NOT EXISTS windows (
   slug TEXT PRIMARY KEY,                    -- cpc-btc-updown-5m-2026-11-22-1810z
   asset TEXT, series TEXT,                  -- btc, 5m / 15m / 1h
   start_ts INTEGER, end_ts INTEGER,
-  strike REAL,                              -- our estimate of the official start price
+  strike REAL,                              -- the start price: Polymarket's official one once published, our estimate before
+  official REAL,                            -- Polymarket's official start price (priceToBeat), when published
   result INTEGER,                           -- 1 = Up, 0 = Down
   settled_at INTEGER
 );
@@ -214,3 +215,8 @@ CREATE TABLE IF NOT EXISTS crypto_marks (
 ) WITHOUT ROWID;
 -- What the bot has learned: small JSON blobs keyed by name (btc_model: the latest grading).
 CREATE TABLE IF NOT EXISTS brain (k TEXT PRIMARY KEY, v TEXT NOT NULL, at INTEGER NOT NULL);
+-- Everything the bot does with real money, in plain words, for the app: previews, buys, sells,
+-- misses (the price moved first), skips (Aaron holds the window), errors, pauses, settlements.
+CREATE TABLE IF NOT EXISTS live_events (ts INTEGER NOT NULL, kind TEXT NOT NULL, slug TEXT, detail TEXT);
+CREATE INDEX IF NOT EXISTS idx_live_events_ts ON live_events(ts);
+-- Added Nov 22 (existing databases: ALTER TABLE windows ADD COLUMN official REAL).

@@ -2,10 +2,18 @@
 // Polymarket US bitcoin "Up or Down" windows (5-minute, 15-minute, 1-hour) and the hourly, daily
 // and weekly "BTC above $X" price ladders. It never places a real order.
 //
-//   Live data   Two streams stay open: Polymarket's market-data stream (best bid and ask about
-//               ten times a second, signed with the dashboard's read key) and Coinbase's public
-//               bitcoin ticker. Every update re-checks that market within a quarter second, so a
-//               take-profit or a sell above fair happens on the move, not on the next poll.
+//   Live data   Three streams stay open: Polymarket's market-data stream (best bid and ask about
+//               ten times a second, signed with the dashboard's read key), Coinbase's public
+//               bitcoin ticker and Kraken's (pushed on every best bid/offer change). Every update
+//               re-checks that market within a quarter second, so a take-profit or a sell above
+//               fair happens on the move, not on the next poll.
+//   Price       The windows settle on the CF Benchmarks index, a blend of exchanges, not on any
+//               one of them. Each exchange's mid is shifted by an offset the bot learns at every
+//               window start: Polymarket publishes the official start price a few seconds in, and
+//               the gap between it and that exchange's own average over the same minute is the
+//               offset (smoothed). The bot's price is the average of the fresh, shifted mids.
+//               Nov 22: Coinbase alone read $2-6 above the index and flipped a window decided
+//               by $1.74.
 //               BTC_STREAM=off (a Cloudflare variable) turns the streams off; if one drops, the
 //               5-second loop polls instead until it reconnects.
 //   Honest fills Buys at the ask, sells at the bid, full taker fee. On stream data a buy or a
@@ -17,29 +25,49 @@
 //   Strike      A window settles Up if the CF Benchmarks index (60 one-second readings in its
 //               final minute) ends at or above the same average in the minute before it opened.
 //               Polymarket publishes that starting price (priceToBeat) a few seconds in; until
-//               then we use our own one-second Coinbase average, which has landed within $2.
+//               then we use our own one-second average of the bot's price.
 //   Fair value  fairUp(): where bitcoin sits vs. the strike, realized volatility times a scale
 //               the bot tunes itself, time left, and the averaging at the end.
 //   Learning    Every 30 s each open window gets a checkpoint (what the math and the market said).
 //               After settlement the checkpoints are graded: is the math sharper than the market,
-//               and which volatility scale would have scored best. Every half hour the bot adopts
-//               the best scale (0.7x to 2.6x) once 40+ windows have been graded.
-//   Sizing      stakeFor(): Kelly on each strategy's current account ($100 start plus everything
-//               won or lost), so bets grow as it grows: up to a sixth of the account per window, a quarter of what's offered at the best
-//               price, and Aaron's BOT_MAX_BET when he sets one. A strategy stops for the day
-//               after losing a third of what it started the day with.
+//               which volatility scale would have scored best, and how much of the math to trust
+//               over the market's own price (the blend that scores best). Every half hour, once
+//               40+ windows are graded, the bot adopts the best scale and that trust; the trust
+//               sizes every bet, so bets grow only as fast as the math proves itself.
+//   Data check  No entry unless the bot's price is fresh off a live exchange stream, and none when
+//               the math is more than 15 points from the market's mid: a gap that big is our data
+//               being off, not the market (Nov 22: 1 win in 9 such bets). After a losing exit a
+//               strategy stays out of that window.
+//   Sizing      stakeFor(): Kelly on each account's current value ($100 start plus everything won
+//               or lost) times the learned trust, so bets grow as the account grows, inside the
+//               risk ladder (fairvalue.ts): per-bet and all-open caps and a floor under the peak
+//               that tighten as the account gets bigger (10% a bet at $100, 1.5% at $100K), bets
+//               shrinking in step as the account falls toward the floor. Also capped at a quarter
+//               of what's offered at the best price and Aaron's BOT_MAX_BET when he sets one, with
+//               a day stop from the same ladder.
 //   Settlement  After a window ends, the result is read back from the gateway.
+//   Real money  With LIVE_TRADING=on, one strategy (LIVE_STRATEGY, default crypto_fair_v1) also
+//               trades the live account: the same decision, then a real IOC limit order at the price
+//               it saw (never worse), its actual fills and fees recorded, a resting 2x take-profit
+//               where that strategy uses one, and IOC sells at the bid. Before its first real order
+//               after each start the bot sends that order to Polymarket's preview endpoint and only
+//               goes on if it checks out. It never trades a window where the account holds a
+//               position or orders it didn't place (Aaron's own trades), stops for the day after
+//               losing a third of the day's starting account, and pauses 15 minutes after three
+//               order errors in a row. Every action lands in live_events for the app.
 
 import { DurableObject } from 'cloudflare:workers';
-import { fairUp, gradeModel, parseWindow, windowEnd, windowSlug, type Mark } from './cryptomath';
+import { fairUp, gradeModel, learnOffset, parseWindow, windowEnd, windowSlug, type Mark } from './cryptomath';
 import { dailyStopHit, stakeFor } from './fairvalue';
-import { bankroll, closePosition, loadOpenBySlug, openPosition, settlePosition, type Bankroll, type Position } from './paper';
+import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
 import { signedHeaders, type PmEnv } from './polymarket';
+import { accountPosition, cancelOrder, getOrder, openOrders, placeOrder, previewOrder, type OrderSpec } from './orders';
 
 const GATEWAY = 'https://gateway.polymarket.us';
 const PM_API = 'https://api.polymarket.us';
 const PM_WS_PATH = '/v1/ws/markets';
 const CB_WS = 'https://ws-feed.exchange.coinbase.com';
+const KR_WS = 'https://ws.kraken.com/v2';
 const SPOT_URL = 'https://api.exchange.coinbase.com/products/BTC-USD/ticker';
 const UA = { 'User-Agent': 'pilk-bets/1.0' };
 const TICK = 5_000;
@@ -62,19 +90,26 @@ const REENTER_AFTER = 15_000;   // after a sell, wait this long before re-enteri
 const MARK_EVERY = 30_000;
 const TUNE_EVERY = 30 * MIN;
 const MAX_EDGE = 0.3;           // an "edge" bigger than this is bad data, not a gift
+const MAX_GAP = 0.15;           // math this far over the market's mid: our data is off (1 win in 9, Nov 22)
+const BASIS_ALPHA = 0.3;        // how fast each exchange's learned offset follows new official prices
+const BASIS_MAX = 50;           // a gap bigger than $50 is a broken feed, not an offset
+const FEEDS = ['cb', 'kr'] as const;
+type Feed = typeof FEEDS[number];
 const COEF = 0.095;             // taker fee coefficient (app rate; the API program is cheaper)
 const MAX_LIVE_WINDOWS = 3;     // per strategy: one each of 5m, 15m and 1h at most
 const LADDER = 'crypto_ladder_v1';
 const LADDER_EVERY = 60_000;
 const LADDER_MAX_OPEN = 3;
 const feePer = (p: number) => COEF * p * (1 - p);
+const LIVE_COEF = 0.0695;       // API taker coefficient through Dec 31 2026 (70% of it rebated weekly)
+const feeLive = (p: number) => LIVE_COEF * p * (1 - p);
 
 // The bitcoin lineup. Each strategy trades its own paper account of BOT_ALLOCATION dollars, so the
 // results compare cleanly; the winners are the ones that would get real money.
 //   crypto_fair_v1      buy a side 5c+ under the math (after fees); sell if it gets 3c over fair
 //   crypto_fair_strict  same, 10c+ edge
-//   crypto_fair_max     the fair_v1 picks at full size (half Kelly on the full edge), to see what
-//                       bigger bets do to the swings
+//   crypto_fair_max     the fair_v1 picks at twice the Kelly fraction, to see what bigger bets do
+//                       to the swings (trust is the learned one, like everyone else's)
 //   crypto_hold_v1      the fair_v1 picks held to the result, never sold early: tests whether the
 //                       early sells help
 //   crypto_double_v1    his move: a side at 10-45c the math calls fair or cheap, with a sell order
@@ -97,12 +132,12 @@ interface CryptoStrategy {
   tauMax?: number;            // ...and at most this many (default: 30 s after the open)
   live?: boolean;             // only on live stream data
   trigger?: 'lag' | 'fade';
-  kelly?: { fraction: number; trust: number };
+  kelly?: { fraction: number };
 }
 const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_fair_v1', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15, exitAbove: 0.03, tauMin: 75 },
   { id: 'crypto_fair_strict', minEdge: 0.1, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15, exitAbove: 0.03, tauMin: 75 },
-  { id: 'crypto_fair_max', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15, exitAbove: 0.03, tauMin: 75, kelly: { fraction: 0.5, trust: 1 } },
+  { id: 'crypto_fair_max', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15, exitAbove: 0.03, tauMin: 75, kelly: { fraction: 0.5 } },
   { id: 'crypto_hold_v1', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0, exitAbove: null, tauMin: 75 },
   { id: 'crypto_double_v1', minEdge: 0.02, priceMin: 0.1, priceMax: 0.45, tpBelow: 0.46, exitAbove: null, tauMin: 90 },
   { id: 'crypto_cheap_v1', minEdge: 0.03, priceMin: 0.05, priceMax: 0.2, tpBelow: 0.2, exitAbove: 0.03, tauMin: 75 },
@@ -139,10 +174,12 @@ interface CryptoEnv extends Partial<PmEnv> {
   BOT_ALLOCATION?: string;  // each paper strategy's starting account (default 100)
   BOT_MAX_BET?: string;     // Aaron's cap per bet, when set
   BTC_STREAM?: string;      // "off" turns the live streams off (polling only)
+  LIVE_TRADING?: string;    // "on" lets the bot place real orders with the live account (Aaron sets it)
+  LIVE_STRATEGY?: string;   // which strategy trades real money (default crypto_fair_v1)
 }
 type Side = 'long' | 'short';
 type Src = 'stream' | 'poll';
-type Kind = 'crypto_ticks' | 'crypto_signals' | 'spot';
+type Kind = 'crypto_ticks' | 'crypto_signals' | 'spot' | 'gap_skips';
 interface Win { slug: string; series: string; start: number; end: number; lookback: number }
 interface Quote { bid: number | null; ask: number | null; ts: number; src: Src; state: string | null; bidShares: number | null; askShares: number | null }
 interface Conn { ws: WebSocket; slugs: string[]; at: number; last: number; n: number }
@@ -165,6 +202,14 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   // Spot: the latest price, 1-second samples (strike and end averages, last 10 minutes), and
   // 5-second samples (volatility, last 2 hours).
   private spot: { price: number; ts: number; src: Src } | null = null;
+  // Exchange feeds: each one's latest raw mid, raw 1-second samples (last 10 minutes), and its
+  // learned offset to the official index (official − exchange, smoothed over window starts).
+  private feed: Record<Feed, { price: number; ts: number } | null> = { cb: null, kr: null };
+  private feedSec: Record<Feed, Array<[number, number]>> = { cb: [], kr: [] };
+  private basis: Record<Feed, number> = { cb: 0, kr: 0 };
+  private basisN: Record<Feed, number> = { cb: 0, kr: 0 };
+  private basisLog: Array<{ ts: number; official: number; cb: number | null; kr: number | null }> = [];
+  private basisAt = new Set<number>();
   private spotSec: Array<[number, number]> = [];
   private spotHist: Array<[number, number]> = [];
   private lastSec = 0;
@@ -191,25 +236,39 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private pending = new Set<string>();
   private evalAt = new Map<string, number>();
   private mult = 1;
+  private trust = 0.5;                    // share of the math believed over the market's price (learned)
+  private lostIn = new Set<string>();     // strategy|window (L: for live) closed at a loss: stay out
+  private gapAt = new Map<string, number>();
+  // Live trading
+  private liveVerified = false;                                  // a preview has checked out since start
+  private livePausedUntil = 0;
+  private liveErrors = 0;
+  private liveOrderIds = new Set<string>();                      // every exchange order id the bot placed
+  private liveTp = new Map<string, { id: string; price: number }>(); // live position id → resting take-profit
+  private tpFilled = new Map<string, number>();                  // take-profit order id → contracts already recorded
+  private tpCheckAt = new Map<string, number>();
+  private liveSkip = new Map<string, number>();                  // slug → skip until (Aaron trades it)
   // Streams
   private pm: Conn | null = null;
   private cb: Conn | null = null;
+  private kr: Conn | null = null;
   private pmRetryAt = 0; private pmFails = 0;
   private cbRetryAt = 0; private cbFails = 0;
+  private krRetryAt = 0; private krFails = 0; private krMsgs = 0;
   private pmMsgs = 0; private cbMsgs = 0; private pmConnects = 0;
   // Housekeeping
   private booted = false;
   private settledAt = 0;
   private ladderAt = 0;
   private tunedAt = 0;
-  private counts: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0 };
-  private lastAt: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0 };
+  private counts: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0 };
+  private lastAt: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0 };
   private flushedAt = 0;
 
   async fetch(_req: Request): Promise<Response> {
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm == null || alarm > Date.now() + 2 * MIN) await this.ctx.storage.setAlarm(Date.now() + 1_000);
-    return Response.json({ ok: true, alarm, spot: this.spot?.price ?? null, stream: !!this.pm, ticker: !!this.cb, mult: this.mult });
+    return Response.json({ ok: true, alarm, spot: this.spot?.price ?? null, stream: !!this.pm, ticker: !!this.cb, kraken: !!this.kr, mult: this.mult, trust: this.trust, basis: this.basis });
   }
 
   async alarm(): Promise<void> {
@@ -258,6 +317,14 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       const b = await this.env.DB.prepare("SELECT v FROM brain WHERE k = 'btc_model'").first<{ v: string }>();
       const saved = b ? JSON.parse(b.v) : null;
       if (saved?.ready && Number(saved.mult) > 0) this.mult = Number(saved.mult);
+      if (saved?.ready && saved.trust != null && Number(saved.trust) >= 0 && Number(saved.trust) <= 1) this.trust = Number(saved.trust);
+      const bb = await this.env.DB.prepare("SELECT v FROM brain WHERE k = 'btc_basis'").first<{ v: string }>();
+      const sb = bb ? JSON.parse(bb.v) : null;
+      if (sb) for (const f of FEEDS) {
+        if (Number.isFinite(Number(sb[f]))) this.basis[f] = Number(sb[f]);
+        if (Number.isFinite(Number(sb.n?.[f]))) this.basisN[f] = Number(sb.n[f]);
+      }
+      if (Array.isArray(sb?.log)) { this.basisLog = sb.log.slice(-24); for (const r of this.basisLog) this.basisAt.add(r.ts); }
     } catch (e) {
       console.log('crypto boot error', String((e as any)?.message || e));
     }
@@ -278,7 +345,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   }
 
   private async ensureStreams(now: number) {
-    if (this.env.BTC_STREAM === 'off') { this.drop('pm'); this.drop('cb'); return; }
+    if (this.env.BTC_STREAM === 'off') { this.drop('pm'); this.drop('cb'); this.drop('kr'); return; }
     const want = this.wantSlugs(now);
     const pmOk = this.pm && now - this.pm.last < STREAM_STALE && want.every((s) => this.pm!.slugs.includes(s));
     if (!pmOk && now >= this.pmRetryAt && this.env.POLYMARKET_KEY_ID && this.env.POLYMARKET_SECRET_KEY) {
@@ -298,9 +365,18 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         console.log('ticker error', String((e as any)?.message || e));
       }
     }
+    const krOk = this.kr && now - this.kr.last < STREAM_STALE;
+    if (!krOk && now >= this.krRetryAt) {
+      try { await this.connectKr(now); this.krFails = 0; }
+      catch (e) {
+        this.krFails++;
+        this.krRetryAt = now + Math.min(60_000, 2_000 * 2 ** this.krFails);
+        console.log('kraken error', String((e as any)?.message || e));
+      }
+    }
   }
 
-  private drop(which: 'pm' | 'cb') {
+  private drop(which: 'pm' | 'cb' | 'kr') {
     const c = this[which];
     this[which] = null;
     if (c) try { c.ws.close(1000, 'off'); } catch {}
@@ -368,9 +444,91 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     const bid = Number(j.best_bid), ask = Number(j.best_ask), px = Number(j.price);
     const price = bid > 0 && ask >= bid ? (bid + ask) / 2 : px;
     if (!(price > 0)) return;
-    this.spot = { price, ts: now, src: 'stream' };
-    this.sample(now, price);
+    this.onPrice('cb', price, now);
+  }
+
+  // Kraken's level-1 ticker, pushed on every best bid/offer change: the second exchange in the
+  // bot's price, and the steady one (Coinbase's ticker only speaks on trades, and goes quiet).
+  private async connectKr(now: number) {
+    const res = await fetch(KR_WS, { headers: { ...UA, Upgrade: 'websocket' }, signal: AbortSignal.timeout(8_000) });
+    const ws = res.webSocket;
+    if (!ws) throw new Error(`kraken refused: HTTP ${res.status}`);
+    ws.accept();
+    const conn: Conn = { ws, slugs: [], at: now, last: now, n: 0 };
+    ws.addEventListener('message', (e) => this.onKr(conn, e.data));
+    const gone = () => { if (this.kr === conn) this.kr = null; };
+    ws.addEventListener('close', gone);
+    ws.addEventListener('error', gone);
+    ws.send(JSON.stringify({ method: 'subscribe', params: { channel: 'ticker', symbol: ['BTC/USD'], event_trigger: 'bbo' } }));
+    const old = this.kr;
+    this.kr = conn;
+    if (old) try { old.ws.close(1000, 'reconnected'); } catch {}
+  }
+
+  private onKr(conn: Conn, data: unknown) {
+    const now = Date.now();
+    conn.last = now; conn.n++; this.krMsgs++;   // heartbeats count too: they keep the connection fresh
+    if (typeof data !== 'string') return;
+    let j: any;
+    try { j = JSON.parse(data); } catch { return; }
+    if (j?.channel !== 'ticker' || !Array.isArray(j.data) || !j.data.length) return;
+    const bid = Number(j.data[0]?.bid), ask = Number(j.data[0]?.ask);
+    if (!(bid > 0 && ask >= bid)) return;
+    this.onPrice('kr', (bid + ask) / 2, now);
+  }
+
+  // A new exchange price: keep its raw one-second samples (to learn its offset), rebuild the bot's
+  // price and re-check the open windows.
+  private onPrice(f: Feed, price: number, now: number) {
+    this.feed[f] = { price, ts: now };
+    this.feedSample(f, price, now);
+    const c = this.composite(now);
+    if (c == null) return;
+    this.spot = { price: c, ts: now, src: 'stream' };
+    this.sample(now, c);
     for (const slug of this.current.keys()) this.kick(slug);
+  }
+
+  private feedSample(f: Feed, price: number, now: number) {
+    const s = this.feedSec[f];
+    if (!s.length || Math.floor(s[s.length - 1][0] / 1000) !== Math.floor(now / 1000)) s.push([now, price]);
+    while (s.length && s[0][0] < now - 10 * MIN) s.shift();
+  }
+
+  // The bot's read of the settlement index right now: every exchange mid from the last 3 seconds,
+  // each shifted by its learned offset, averaged. If one exchange goes quiet the other carries it
+  // without a jump, since both are already lined up with the index.
+  private composite(now: number): number | null {
+    let sum = 0, n = 0;
+    for (const f of FEEDS) {
+      const x = this.feed[f];
+      if (x && now - x.ts <= SPOT_LIVE) { sum += x.price + this.basis[f]; n++; }
+    }
+    return n ? sum / n : null;
+  }
+
+  // Polymarket just published a window's official start price: the index's average over the minute
+  // before `start`. Compare each exchange's own average over that minute and move its offset a step
+  // toward the gap. Windows of different lengths that start together share one start price, so each
+  // start is learned once.
+  private learnBasis(start: number, official: number, now: number) {
+    if (this.basisAt.has(start) || now - start > 10 * MIN) return;
+    this.basisAt.add(start);
+    const row: { ts: number; official: number; cb: number | null; kr: number | null } = { ts: start, official: r2(official), cb: null, kr: null };
+    for (const f of FEEDS) {
+      const pts = this.feedSec[f].filter(([ts]) => ts >= start - MIN && ts < start);
+      if (pts.length < 10) continue;
+      const gap = official - pts.reduce((a, [, p]) => a + p, 0) / pts.length;
+      row[f] = r2(gap);
+      if (Math.abs(gap) > BASIS_MAX) continue;
+      this.basis[f] = learnOffset(this.basis[f], this.basisN[f], gap, BASIS_ALPHA);
+      this.basisN[f]++;
+    }
+    this.basisLog.push(row);
+    while (this.basisLog.length > 24) this.basisLog.shift();
+    for (const ts of this.basisAt) if (ts < now - 3 * 3_600_000) this.basisAt.delete(ts);
+    this.pendingStmts.push(this.env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
+      .bind('btc_basis', JSON.stringify({ cb: r2(this.basis.cb), kr: r2(this.basis.kr), n: this.basisN, log: this.basisLog }), now));
   }
 
   private sample(now: number, price: number) {
@@ -408,9 +566,16 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private async readSpot(now: number, stmts: D1PreparedStatement[]): Promise<number | null> {
     let price = this.spot && this.spot.src === 'stream' && now - this.spot.ts <= SPOT_LIVE ? this.spot.price : null;
     if (price == null) {
+      // No live stream: Coinbase's REST ticker, shifted by Coinbase's learned offset. Fair values
+      // still work on it, but no new entries (they need a live stream).
       try {
         const res = await fetch(SPOT_URL, { headers: UA });
-        if (res.ok) price = num(((await res.json()) as any).price);
+        if (res.ok) {
+          const j = (await res.json()) as any;
+          const bid = num(j.bid), ask = num(j.ask), px = num(j.price);
+          const raw = bid && ask && ask >= bid ? (bid + ask) / 2 : px;
+          if (raw) { this.feed.cb = { price: raw, ts: now }; this.feedSample('cb', raw, now); price = raw + this.basis.cb; }
+        }
       } catch {}
       if (price != null) { this.spot = { price, ts: now, src: 'poll' }; this.sample(now, price); }
     }
@@ -458,7 +623,8 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     const pre = this.avgSpot(w.start - MIN, w.start);
     const k = pre && pre.n >= 3 ? pre.avg : null;
     this.strike.set(w.slug, k);
-    if (k != null) this.pendingStmts.push(this.env.DB.prepare('UPDATE windows SET strike = ? WHERE slug = ? AND strike IS NULL').bind(k, w.slug));
+    if (k != null) this.pendingStmts.push(this.env.DB.prepare('INSERT INTO windows (slug, asset, series, start_ts, end_ts, strike) VALUES (?,?,?,?,?,?) ON CONFLICT(slug) DO UPDATE SET strike = COALESCE(windows.strike, excluded.strike)')
+      .bind(w.slug, ASSET, w.series, w.start, w.end, k));
   }
 
   private fairFor(w: Win, now: number): Fair | null {
@@ -508,7 +674,14 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       if (k && k > 0 && !this.official.has(m.slug)) {
         this.official.add(m.slug);
         this.strike.set(m.slug, k);
-        stmts.push(this.env.DB.prepare('UPDATE windows SET strike = ? WHERE slug = ?').bind(k, m.slug));
+        const pw = parseWindow(m.slug);
+        if (pw) {
+          // An upsert, so it lands whether or not the window's row exists yet (the old UPDATE could
+          // run first and miss, leaving our estimate in the record).
+          stmts.push(this.env.DB.prepare('INSERT INTO windows (slug, asset, series, start_ts, end_ts, strike, official) VALUES (?,?,?,?,?,?,?) ON CONFLICT(slug) DO UPDATE SET strike = excluded.strike, official = excluded.official')
+            .bind(m.slug, ASSET, pw.series, pw.start, pw.end, k, k));
+          this.learnBasis(pw.start, k, now);
+        }
       }
     }
     const tick = this.env.DB.prepare('INSERT OR IGNORE INTO ticks (slug, ts, bid, ask, last, vol, bid_depth, ask_depth, state) VALUES (?,?,?,?,?,?,?,?,?)');
@@ -625,19 +798,34 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
 
     for (const p of this.open) {
       if (p.status !== 'open' || p.market_slug !== w.slug) continue;
-      await this.exitWindow(p, q, f?.fair ?? null, tau, now, src);
+      if (p.mode === 'live') await this.liveExit(p, q, f?.fair ?? null, tau, now, src);
+      else await this.exitWindow(p, q, f?.fair ?? null, tau, now, src);
     }
-    if (!f) return;
+    // Entries only on a price fresh off a live exchange stream; exits above still run on anything.
+    if (!f || !f.live) return;
 
-    const live = q.src === 'stream' && now - q.ts <= QUOTE_LIVE && f.live;
+    const streamLive = q.src === 'stream' && now - q.ts <= QUOTE_LIVE;
+    const mid = q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : null;
     const len = (w.end - w.start) / 1000;
+    const liveId = this.liveOn() && now >= this.livePausedUntil && now >= (this.liveSkip.get(w.slug) || 0) ? this.liveStrategy() : null;
     for (const st of CRYPTO_STRATEGIES) {
       const key = `${st.id}|${w.slug}`;
-      if ((st.live && !live) || tau < st.tauMin || tau > (st.tauMax ?? len - 30)) { this.seen.delete(key); continue; }
-      const mine = this.open.filter((x) => x.status === 'open' && x.strategy === st.id);
-      if (mine.some((x) => x.market_slug === w.slug)) continue;
-      if (mine.filter((x) => (windowEnd(x.market_slug) ?? 0) > now).length >= MAX_LIVE_WINDOWS) continue;
-      if (now - (this.exitedAt.get(key) || 0) < REENTER_AFTER) continue;
+      if ((st.live && !streamLive) || tau < st.tauMin || tau > (st.tauMax ?? len - 30)) { this.seen.delete(key); continue; }
+      // Is there room for a paper entry, a live entry, or both?
+      const paperMine = this.open.filter((x) => x.status === 'open' && x.mode !== 'live' && x.strategy === st.id);
+      const paperFree = !paperMine.some((x) => x.market_slug === w.slug)
+        && paperMine.filter((x) => (windowEnd(x.market_slug) ?? 0) > now).length < MAX_LIVE_WINDOWS
+        && now - (this.exitedAt.get(key) || 0) >= REENTER_AFTER
+        && !this.lostIn.has(key);
+      let liveFree = false;
+      if (liveId === st.id) {
+        const liveMine = this.open.filter((x) => x.status === 'open' && x.mode === 'live');
+        liveFree = !liveMine.some((x) => x.market_slug === w.slug)
+          && liveMine.filter((x) => (windowEnd(x.market_slug) ?? 0) > now).length < MAX_LIVE_WINDOWS
+          && now - (this.exitedAt.get(`L:${key}`) || 0) >= REENTER_AFTER
+          && !this.lostIn.has(`L:${key}`);
+      }
+      if (!paperFree && !liveFree) continue;
 
       let cands = this.sides(q, f.fair);
       if (st.trigger) {
@@ -652,6 +840,9 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       const best = cands.filter((c) => c.ask >= st.priceMin && c.ask <= st.priceMax && c.edge >= st.minEdge && c.edge <= MAX_EDGE)
         .sort((a, b) => b.edge - a.edge)[0];
       if (!best) { this.seen.delete(key); continue; }
+      // The data check: math way over the market's mid means our price is off, not a gift.
+      const midSide = mid == null ? null : best.side === 'long' ? mid : 1 - mid;
+      if (midSide != null && best.fair - midSide > MAX_GAP) { this.seen.delete(key); this.gapSkip(w, best, midSide, f, tau, now); continue; }
       // On the stream, the price has to still be there 0.6 s later, like a real order landing.
       if (src === 'stream') {
         const s = this.seen.get(key);
@@ -660,23 +851,146 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       }
       this.seen.delete(key);
 
-      const bank = await this.bank(st.id, now);
-      if (dailyStopHit(bank.equity, bank.today)) continue;
-      const stake = stakeFor({
-        fair: best.fair, price: best.ask, equity: bank.equity, available: bank.available,
-        fraction: st.kelly?.fraction, trust: st.kelly?.trust, depth: best.depth, ceiling: this.ceiling(),
-      });
-      const qty = Math.floor(stake / best.ask);
-      if (qty < 1) continue;
-      const pos = await openPosition(this.env.DB, {
-        strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side,
-        sideName: `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`, ask: best.ask, qty, coef: COEF,
-        reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${leftText(tau)}${src === 'stream' ? ', live' : ''}`, now, tpBelow: st.tpBelow,
-        meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, src, equity: r2(bank.equity) },
-      });
-      this.open.push(pos);
-      this.bankCache.delete(st.id);
+      if (paperFree) {
+        const bank = await this.bank(st.id, now);
+        if (!dailyStopHit(bank.equity, bank.today, bank.peak)) {
+          const stake = stakeFor({
+            fair: best.fair, price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
+            fraction: st.kelly?.fraction, trust: this.trust, depth: best.depth, ceiling: this.ceiling(),
+          });
+          const qty = Math.floor(stake / best.ask);
+          if (qty >= 1) {
+            const pos = await openPosition(this.env.DB, {
+              strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side,
+              sideName: `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`, ask: best.ask, qty, coef: COEF,
+              reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${leftText(tau)}${src === 'stream' ? ', on stream' : ''}`, now, tpBelow: st.tpBelow,
+              meta: { fair: r4(best.fair), edge: r4(best.edge), mid: midSide == null ? null : r4(midSide), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, trust: this.trust, feeds: this.feedsNow(now), src, equity: r2(bank.equity) },
+            });
+            pos.mode = 'paper';
+            this.open.push(pos);
+            this.bankCache.delete(st.id);
+          }
+        }
+      }
+      if (liveFree) await this.liveEnter(w, st, best, f, tau, now);
     }
+  }
+
+  // ---------- real money
+
+  private async liveEnter(w: Win, st: CryptoStrategy, best: Cand, f: Fair, tau: number, now: number) {
+    const db = this.env.DB, env = this.env as PmEnv;
+    const name = `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`;
+    const bank = await this.bank('live', now);
+    if (dailyStopHit(bank.equity, bank.today, bank.peak)) return;
+    const stake = stakeFor({
+      fair: best.fair, price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
+      fraction: st.kelly?.fraction, trust: this.trust, depth: best.depth, ceiling: this.ceiling(),
+    });
+    const qty = Math.floor(stake / best.ask);
+    if (qty < 1) return;
+    // Never trade a window where the account holds anything, or has orders the bot didn't place:
+    // those are Aaron's, and the exchange would net them against the bot's.
+    const [held, orders] = await Promise.all([accountPosition(env, w.slug), openOrders(env, w.slug)]);
+    if (held == null || orders == null) { this.liveEvent(now, 'skip', w.slug, `${name}: couldn't read the account, skipped`); return; }
+    if (Math.abs(held) > 1e-9) { this.liveSkip.set(w.slug, w.end); this.liveEvent(now, 'skip', w.slug, `${name}: the account already holds ${held} contracts here, skipped this window`); return; }
+    if (orders.some((o) => !this.liveOrderIds.has(o.id))) { this.liveSkip.set(w.slug, w.end); this.liveEvent(now, 'skip', w.slug, `${name}: you have orders open here, skipped this window`); return; }
+
+    const spec: OrderSpec = { slug: w.slug, side: best.side, action: 'buy', sidePx: best.ask, qty, tif: 'ioc' };
+    if (!this.liveVerified) {
+      const pv = await previewOrder(env, spec);
+      this.liveEvent(now, pv.ok ? 'preview' : 'error', w.slug, `${pv.ok ? 'Preview checked out' : 'Preview failed'}: buy ${qty} ${name} at ${cents(best.ask)}. ${pv.detail}`);
+      if (!pv.ok) { this.livePausedUntil = now + 10 * MIN; return; }
+      this.liveVerified = true;
+    }
+    const r = await placeOrder(env, spec);
+    if (r.id) this.liveOrderIds.add(r.id);
+    if (r.error || r.reject) {
+      this.liveEvent(now, 'error', w.slug, `Buy ${qty} ${name} at ${cents(best.ask)} failed: ${r.error || r.reject}`);
+      if (++this.liveErrors >= 3) { this.liveErrors = 0; this.livePausedUntil = now + 15 * MIN; this.liveEvent(now, 'pause', null, 'Three order errors in a row: paused real trading for 15 minutes'); }
+      return;
+    }
+    this.liveErrors = 0;
+    if (r.filled <= 0 || r.avgSidePx == null) { this.liveEvent(now, 'miss', w.slug, `No fill: buy ${qty} ${name} at ${cents(best.ask)}, the price moved first`); return; }
+    const pos = await openLivePosition(db, {
+      strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side, sideName: name,
+      qty: r.filled, avgPx: r.avgSidePx, fee: r.fee, limitPx: best.ask, exchangeId: r.id,
+      reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${leftText(tau)}`, now,
+      meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, trust: this.trust, feeds: this.feedsNow(now), equity: r2(bank.equity), asked: qty },
+    });
+    this.open.push(pos);
+    this.bankCache.delete('live');
+    this.liveEvent(now, 'buy', w.slug, `Bought ${r.filled} ${name} at ${cents(r.avgSidePx)} for $${(r.filled * r.avgSidePx + r.fee).toFixed(2)} (fee $${r.fee.toFixed(2)}); math says ${cents(best.fair)}`);
+    // His 2x idea where this strategy uses it: a resting sell at double the fill, maker only.
+    const tp = takeProfitFor(r.avgSidePx, st.tpBelow);
+    if (tp != null) {
+      const t = await placeOrder(env, { slug: w.slug, side: best.side, action: 'sell', sidePx: tp, qty: r.filled, tif: 'gtc', postOnly: true });
+      if (t.id && !t.error && !t.reject) {
+        this.liveOrderIds.add(t.id);
+        await recordLiveTakeProfit(db, pos, { price: tp, qty: r.filled, exchangeId: t.id, now });
+        this.liveTp.set(pos.id, { id: t.id, price: tp });
+        this.tpFilled.set(t.id, 0);
+      } else this.liveEvent(now, 'error', w.slug, `Take-profit at ${cents(tp)} not placed: ${t.error || t.reject}`);
+    }
+  }
+
+  private async liveExit(p: Position, q: Quote, fair: number | null, tau: number, now: number, src: Src) {
+    const bidSide = p.side === 'long' ? q.bid : q.ask != null ? r4(1 - q.ask) : null;
+    if (bidSide == null) return;
+    const tp = this.liveTp.get(p.id);
+    // The resting take-profit: ask the exchange what filled when the market reaches it, and every 15 s.
+    if (tp && (bidSide >= tp.price || now - (this.tpCheckAt.get(p.id) || 0) > 15_000)) await this.checkTp(p, tp, now);
+    if (p.status !== 'open' || !this.liveOn()) return; // switched off: open positions ride to the result
+    const st = BY_ID.get(p.strategy);
+    if (!st || st.exitAbove == null || fair == null || tau < (st.tauMax != null ? 8 : 20)) return;
+    const fairSide = p.side === 'long' ? fair : 1 - fair;
+    const key = `lx|${p.id}`;
+    if (bidSide < fairSide + feeLive(bidSide) + st.exitAbove) { this.seen.delete(key); return; }
+    if (src === 'stream') {
+      const s = this.seen.get(key);
+      if (!s) { this.seen.set(key, { side: p.side, at: now }); return; }
+      if (now - s.at < HOLD_FOR) return;
+    }
+    this.seen.delete(key);
+    const env = this.env as PmEnv;
+    if (tp) {
+      await cancelOrder(env, tp.id, p.market_slug);
+      await this.checkTp(p, tp, now, true);
+      if (p.status !== 'open') return;
+    }
+    const r = await placeOrder(env, { slug: p.market_slug, side: p.side, action: 'sell', sidePx: bidSide, qty: p.qty, tif: 'ioc' });
+    if (r.id) this.liveOrderIds.add(r.id);
+    if (r.error || r.reject) { this.liveEvent(now, 'error', p.market_slug, `Sell ${p.qty} ${p.side_name} at ${cents(bidSide)} failed: ${r.error || r.reject}`); return; }
+    if (r.filled <= 0 || r.avgSidePx == null) { this.liveEvent(now, 'miss', p.market_slug, `Sell at ${cents(bidSide)} missed, still holding ${p.qty} ${p.side_name}`); return; }
+    await liveSell(this.env.DB, p, {
+      qty: r.filled, avgPx: r.avgSidePx, fee: r.fee, limitPx: bidSide, exchangeId: r.id, maker: false,
+      reason: `above fair: bid ${cents(bidSide)} vs fair ${cents(fairSide)}, ${leftText(tau)}`, now,
+    });
+    this.liveEvent(now, 'sell', p.market_slug, `Sold ${r.filled} ${p.side_name} at ${cents(r.avgSidePx)} (fee $${r.fee.toFixed(2)})${p.status === 'open' ? `, ${p.qty} still held` : `, P&L $${(p.proceeds - p.cost).toFixed(2)}`}`);
+    if (p.status !== 'open') this.closed(p, now);
+    else this.bankCache.delete('live');
+  }
+
+  // Record whatever the resting take-profit has filled since the last look.
+  private async checkTp(p: Position, tp: { id: string; price: number }, now: number, cancelled = false) {
+    this.tpCheckAt.set(p.id, now);
+    const o = await getOrder(this.env as PmEnv, tp.id, p.side);
+    if (!o) return;
+    const seen = this.tpFilled.get(tp.id) || 0;
+    const fresh = Math.min(p.qty, o.filled - seen);
+    if (fresh > 1e-9) {
+      this.tpFilled.set(tp.id, o.filled);
+      const fee = o.filled > 0 ? Math.round((o.fee * fresh / o.filled) * 100) / 100 : 0;
+      await liveSell(this.env.DB, p, { qty: fresh, avgPx: o.avgSidePx ?? tp.price, fee, limitPx: tp.price, exchangeId: tp.id, maker: true, reason: `take-profit at ${cents(tp.price)}`, now });
+      this.liveEvent(now, 'sell', p.market_slug, `Take-profit filled: sold ${fresh} ${p.side_name} at ${cents(o.avgSidePx ?? tp.price)}${p.status === 'open' ? `, ${p.qty} still held` : `, P&L $${(p.proceeds - p.cost).toFixed(2)}`}`);
+    }
+    const done = cancelled || p.status !== 'open' || /^ORDER_STATE_(FILLED|CANCELED|EXPIRED|REJECTED)$/.test(o.state || '');
+    if (done) {
+      this.liveTp.delete(p.id);
+      await markLiveOrder(this.env.DB, tp.id, o.state === 'ORDER_STATE_FILLED' ? 'filled' : 'cancelled', now);
+    }
+    if (p.status !== 'open') this.closed(p, now);
+    else if (fresh > 1e-9) this.bankCache.delete('live');
   }
 
   private async exitWindow(p: Position, q: Quote, fair: number | null, tau: number, now: number, src: Src) {
@@ -704,9 +1018,34 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   }
 
   private closed(p: Position, now: number) {
-    this.exitedAt.set(`${p.strategy}|${p.market_slug}`, now);
-    this.bankCache.delete(p.strategy);
+    const live = p.mode === 'live';
+    const key = `${live ? 'L:' : ''}${p.strategy}|${p.market_slug}`;
+    this.exitedAt.set(key, now);
+    // Out at a loss: the math was wrong about this window once already, so the strategy stays out of
+    // it (Nov 22: three strategies bought back in 18 s after a losing sell and lost $27.53 more).
+    if ((p.pnl ?? 0) < 0) this.lostIn.add(key);
+    this.bankCache.delete(live ? 'live' : p.strategy);
+    if (live) this.liveTp.delete(p.id);
     this.open = this.open.filter((x) => x.status === 'open');
+  }
+
+  // A trade the data check refused: counted for the app, and flagged once per window side.
+  private gapSkip(w: Win, best: Cand, midSide: number, f: Fair, tau: number, now: number) {
+    const k = `${w.slug}|${best.side}`;
+    if (now - (this.gapAt.get(k) || 0) < 60_000) return;
+    this.gapAt.set(k, now);
+    this.bump('gap_skips', now);
+    const name = `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`;
+    this.pendingStmts.push(this.env.DB.prepare('INSERT OR IGNORE INTO signals (slug, ts, kind, side, price, ref, detail) VALUES (?,?,?,?,?,?,?)')
+      .bind(w.slug, now, 'bad_data', best.side, r4(best.ask), r4(best.fair),
+        `Skipped ${name}: math ${cents(best.fair)} vs market ${cents(midSide)}, too far apart to trust, ${leftText(tau)}, BTC ${Math.round(f.spot).toLocaleString('en-US')} vs ${Math.round(f.strike).toLocaleString('en-US')} start`));
+  }
+
+  // Each exchange's raw mid and age at this moment, for the trade record.
+  private feedsNow(now: number) {
+    const out: Record<string, { px: number; age: number } | null> = {};
+    for (const fd of FEEDS) { const x = this.feed[fd]; out[fd] = x ? { px: r2(x.price), age: Math.round((now - x.ts) / 100) / 10 } : null; }
+    return { ...out, basis: { cb: r2(this.basis.cb), kr: r2(this.basis.kr) } };
   }
 
   private allocation() { return Number(this.env.BOT_ALLOCATION || 100) || 100; }
@@ -715,14 +1054,37 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private async bank(strategy: string, now: number): Promise<Bankroll> {
     const c = this.bankCache.get(strategy);
     if (c && now - c.at < 15_000) return c.bank;
-    const bank = await bankroll(this.env.DB, this.allocation(), now, strategy);
+    const bank = strategy === 'live'
+      ? await bankroll(this.env.DB, this.allocation(), now, undefined, 'live')
+      : await bankroll(this.env.DB, this.allocation(), now, strategy);
     this.bankCache.set(strategy, { at: now, bank });
     return bank;
   }
 
+  private liveOn() { return this.env.LIVE_TRADING === 'on' && !!this.env.POLYMARKET_KEY_ID && !!this.env.POLYMARKET_SECRET_KEY; }
+  private liveStrategy() { return this.env.LIVE_STRATEGY || 'crypto_fair_v1'; }
+
+  private liveEvent(now: number, kind: string, slug: string | null, detail: string) {
+    this.pendingStmts.push(this.env.DB.prepare('INSERT INTO live_events (ts, kind, slug, detail) VALUES (?,?,?,?)').bind(now, kind, slug, detail.slice(0, 500)));
+    console.log(`live ${kind}: ${detail}`);
+  }
+
   private async reloadOpen(now: number) {
     try {
-      this.open = (await this.env.DB.prepare("SELECT * FROM bot_positions WHERE mode = 'paper' AND status = 'open' AND strategy LIKE 'crypto_%'").all<Position>()).results;
+      this.open = (await this.env.DB.prepare("SELECT * FROM bot_positions WHERE status = 'open' AND strategy LIKE 'crypto_%'").all<Position>()).results;
+      if (this.open.some((p) => p.mode === 'live') || this.liveOn()) {
+        const rows = (await this.env.DB.prepare(`SELECT position_id, exchange_order_id, price, status, filled_qty, reason FROM bot_orders
+            WHERE mode = 'live' AND exchange_order_id IS NOT NULL AND ts > ?`).bind(now - 86_400_000).all<any>()).results;
+        const openIds = new Set(this.open.filter((p) => p.mode === 'live').map((p) => p.id));
+        const tp = new Map<string, { id: string; price: number }>(), recorded = new Map<string, number>();
+        for (const r of rows) {
+          this.liveOrderIds.add(r.exchange_order_id);
+          if (r.status === 'resting' && r.reason === 'take_profit' && openIds.has(r.position_id)) tp.set(r.position_id, { id: r.exchange_order_id, price: r.price });
+          if (r.status === 'filled' && String(r.reason || '').startsWith('take-profit')) recorded.set(r.exchange_order_id, (recorded.get(r.exchange_order_id) || 0) + (r.filled_qty || 0));
+        }
+        this.liveTp = tp;
+        this.tpFilled = recorded;
+      }
     } catch {}
     this.openAt = now;
   }
@@ -800,8 +1162,8 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
             .sort((a, b) => b.edge - a.edge)[0];
           if (!best) continue;
           const bank = await this.bank(LADDER, t);
-          if (dailyStopHit(bank.equity, bank.today)) continue;
-          const stake = stakeFor({ fair: best.fair, price: best.ask, equity: bank.equity, available: bank.available, ceiling: this.ceiling() });
+          if (dailyStopHit(bank.equity, bank.today, bank.peak)) continue;
+          const stake = stakeFor({ fair: best.fair, price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet, ceiling: this.ceiling() });
           const qty = Math.floor(stake / best.ask);
           if (qty < 1) continue;
           const pos = await openPosition(db, {
@@ -871,9 +1233,17 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         if (up !== 1 && up !== 0) continue;
         stmts.push(set.bind(up, now, m.slug));
         const held = await loadOpenBySlug(this.env.DB, m.slug);
-        for (const p of held) { await settlePosition(this.env.DB, p, { won: (p.side === 'long') === (up === 1), now }); this.bankCache.delete(p.strategy); }
+        for (const p of held) {
+          await settlePosition(this.env.DB, p, { won: (p.side === 'long') === (up === 1), now });
+          this.bankCache.delete(p.mode === 'live' ? 'live' : p.strategy);
+          if (p.mode === 'live') {
+            this.liveTp.delete(p.id);
+            this.liveEvent(now, 'settle', m.slug, `${p.side_name} ${(p.side === 'long') === (up === 1) ? 'won' : 'lost'}: ${p.qty} contracts paid $${((p.side === 'long') === (up === 1) ? p.qty : 0).toFixed(2)}`);
+          }
+        }
         if (held.length) this.open = this.open.filter((p) => p.market_slug !== m.slug);
         this.strike.delete(m.slug); this.official.delete(m.slug); this.hist.delete(m.slug); this.track.delete(m.slug); this.quotes.delete(m.slug);
+        for (const k of this.lostIn) if (k.endsWith(`|${m.slug}`)) this.lostIn.delete(k);
       }
     });
   }
@@ -884,11 +1254,11 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         FROM crypto_marks m JOIN windows w ON w.slug = m.slug
         WHERE w.result IS NOT NULL AND m.ts > ? AND m.spot IS NOT NULL AND m.strike IS NOT NULL AND m.sigma > 0
         ORDER BY m.ts DESC LIMIT 6000`).bind(now - 7 * 86_400_000).all<Mark>();
-    const g = gradeModel(results, this.mult);
+    const g = gradeModel(results, this.mult, this.trust);
     const ready = g.windows >= 40 && g.marks >= 400;
-    if (ready) this.mult = g.next;
+    if (ready) { this.mult = g.next; this.trust = g.trustNext; }
     await this.env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
-      .bind('btc_model', JSON.stringify({ ...g, mult: this.mult, ready, need: 40 }), now).run();
+      .bind('btc_model', JSON.stringify({ ...g, mult: this.mult, trust: this.trust, ready, need: 40 }), now).run();
   }
 
   // ---------- counters for the dashboard
@@ -904,15 +1274,18 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     const add = this.env.DB.prepare('INSERT INTO stats (k, n, last) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET n = n + excluded.n, last = excluded.last');
     const set = this.env.DB.prepare('INSERT INTO stats (k, n, last) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET n = excluded.n, last = excluded.last');
     const stmts: D1PreparedStatement[] = [];
-    for (const k of ['crypto_ticks', 'crypto_signals', 'spot'] as Kind[]) if (this.counts[k]) stmts.push(add.bind(k, this.counts[k], this.lastAt[k]));
+    for (const k of ['crypto_ticks', 'crypto_signals', 'spot', 'gap_skips'] as Kind[]) if (this.counts[k]) stmts.push(add.bind(k, this.counts[k], this.lastAt[k]));
     if (this.spot) stmts.push(set.bind('btc_cents', Math.round(this.spot.price * 100), now));
     const pmLive = !!this.pm && now - this.pm.last < STREAM_STALE, cbLive = !!this.cb && now - this.cb.last < STREAM_STALE;
     stmts.push(set.bind('pm_stream', pmLive ? Math.round((this.pmMsgs / secs) * 10) : 0, now));  // updates per 10 s
     stmts.push(set.bind('cb_stream', cbLive ? Math.round((this.cbMsgs / secs) * 10) : 0, now));
+    const krLive = !!this.kr && now - this.kr.last < STREAM_STALE;
+    stmts.push(set.bind('kr_stream', krLive ? Math.round((this.krMsgs / secs) * 10) : 0, now));
+    stmts.push(set.bind('btc_trust', Math.round(this.trust * 100), now));
     stmts.push(set.bind('btc_mult', Math.round(this.mult * 100), now));
     await this.env.DB.batch(stmts);
-    this.counts = { crypto_ticks: 0, crypto_signals: 0, spot: 0 };
-    this.pmMsgs = 0; this.cbMsgs = 0;
+    this.counts = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0 };
+    this.pmMsgs = 0; this.cbMsgs = 0; this.krMsgs = 0;
     this.flushedAt = now;
   }
 }

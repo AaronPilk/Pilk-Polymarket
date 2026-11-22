@@ -6,8 +6,9 @@ const store = {
   state: null,     // { snapshot, lastSync, apiConfigured }
   bot: null,      // /api/bot: the bot's own ledger
   botRange: 'all', // bot chart: 1h | 1d | 1w | all
-  botGroup: 'all', // all | btc | hoops
-  botCurve: {},    // range -> { at, data } from /api/bot/curve
+  botGroup: 'btc', // live | btc | hoops | all
+  botGroupSet: false,
+  botCurve: {},    // 'paper:1d' | 'live:all' ... -> { at, data } from /api/bot/curve
   range: 'all',
   mode: 'live',    // live | cached | preview
   betFilter: 'All',
@@ -466,20 +467,32 @@ function activityRow(a) {
 }
 
 // bot ----------------------------------------------------------
-const SIGNAL_LABEL = { favorite_fade: 'Favorite fading', swing: 'Big swing', cheap_spike: 'Cheap spike', late_close: 'Close and late', fair_gap: 'Price vs math' };
+const SIGNAL_LABEL = { favorite_fade: 'Favorite fading', swing: 'Big swing', cheap_spike: 'Cheap spike', late_close: 'Close and late', fair_gap: 'Price vs math', bad_data: 'Skipped: data check' };
 const SIGNAL_ICON = {
   favorite_fade: ['rgba(255,159,10,.16)', 'var(--orange)', '<path d="M4 7l6 6 3-3 7 7"/><path d="M15 17h5v-5"/>'],
   swing: ['rgba(10,132,255,.16)', 'var(--blue)', '<path d="M3 13l4-6 4 10 4-8 3 4h3"/>'],
   cheap_spike: ['rgba(48,209,88,.16)', 'var(--green)', '<path d="M12 20V5"/><path d="M6 11l6-6 6 6"/>'],
   late_close: ['rgba(255,69,58,.16)', 'var(--red)', '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2"/>'],
   fair_gap: ['rgba(191,90,242,.16)', 'var(--purple, #bf5af2)', '<path d="M5 9h14M5 15h14"/>'],
+  bad_data: ['rgba(255,159,10,.16)', 'var(--orange)', '<circle cx="12" cy="12" r="8"/><path d="M6.5 17.5l11-11"/>'],
 };
+// What the bot did with real money, by kind.
+const EVENT_ICON = {
+  buy: ['rgba(48,209,88,.16)', 'var(--green)', '<path d="M12 19V5"/><path d="M6 11l6-6 6 6"/>'],
+  sell: ['rgba(10,132,255,.16)', 'var(--blue)', '<path d="M12 5v14"/><path d="M6 13l6 6 6-6"/>'],
+  settle: ['rgba(191,90,242,.16)', 'var(--purple, #bf5af2)', '<circle cx="12" cy="12" r="8"/><path d="M8.5 12.5l2.5 2.5 4.5-5"/>'],
+  preview: ['rgba(48,209,88,.16)', 'var(--green)', '<path d="M5 12.5l4.5 4.5L19 7.5"/>'],
+  miss: ['rgba(118,118,128,.24)', 'var(--label-2)', '<path d="M6 12h12"/>'],
+  skip: ['rgba(255,159,10,.16)', 'var(--orange)', '<path d="M5 12h14M13 6l6 6-6 6"/>'],
+  error: ['rgba(255,69,58,.16)', 'var(--red)', '<path d="M12 7v6"/><path d="M12 17h.01"/>'],
+  pause: ['rgba(255,69,58,.16)', 'var(--red)', '<path d="M9 6v12M15 6v12"/>'],
+};
+const EVENT_LABEL = { buy: 'Bought', sell: 'Sold', settle: 'Settled', preview: 'Order check', miss: 'Missed', skip: 'Skipped', error: 'Error', pause: 'Paused' };
 // Closing-line value: how far the price moved our way by game time (positive = we beat it).
 const clvText = (p) => {
   const v = Math.round((p.close_price - p.avg_entry) * 100);
   return `line ${v > 0 ? '+' : v < 0 ? MINUS : ''}${Math.abs(v)}¢`;
 };
-// Bitcoin first: that's where the testing is focused.
 const STRATEGY_LABEL = {
   crypto_fair_v1: 'Bitcoin · price vs math',
   crypto_fair_strict: 'Bitcoin · price vs math, strict',
@@ -498,32 +511,38 @@ const STRATEGY_LABEL = {
 };
 const variantOf = (id) => (STRATEGY_LABEL[id] || id || '').split(' · ')[1] || '';
 const groupOf = (s) => (s?.startsWith('crypto_') ? 'btc' : s?.startsWith('hoops_') ? 'hoops' : 'other');
-const GROUP_LABEL = { all: 'All', btc: 'Bitcoin', hoops: 'Basketball' };
+const GROUP_LABEL = { live: 'Real money', btc: 'Paper · Bitcoin', hoops: 'Paper · Basketball', all: 'Paper · All' };
 const BOT_RANGE_LABEL = { '1h': 'Last hour', '1d': 'Last 24 hours', '1w': 'Last 7 days', all: 'Since it started' };
-const signalBadge = (kind) => {
-  const [bg, fg, path] = SIGNAL_ICON[kind] || SIGNAL_ICON.swing;
-  return `<span class="badge" style="background:${bg};color:${fg}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${path}</svg></span>`;
-};
+const iconBadge = ([bg, fg, path]) => `<span class="badge" style="background:${bg};color:${fg}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${path}</svg></span>`;
+const signalBadge = (kind) => iconBadge(SIGNAL_ICON[kind] || SIGNAL_ICON.swing);
 
-async function loadCurve(range) {
+const botMode = () => (store.botGroup === 'live' ? 'live' : 'paper');
+const curveKey = (mode = botMode(), range = store.botRange) => `${mode}:${range}`;
+async function loadCurve(range, mode) {
   try {
-    const r = await fetch(`/api/bot/curve?range=${range}`);
-    if (r.ok) store.botCurve[range] = { at: Date.now(), data: await r.json() };
+    const r = await fetch(`/api/bot/curve?range=${range}&mode=${mode}`);
+    if (r.ok) store.botCurve[curveKey(mode, range)] = { at: Date.now(), data: await r.json() };
   } catch {}
 }
+const botGroups = (b) => [...(b?.live ? ['live'] : []), 'btc', ...(b?.sports ? ['hoops', 'all'] : [])];
 
-// /api/bot every 5 s while the tab is open; the chart's data every 30 s, or right away when a
-// trade closes so the line steps the moment it happens.
+// /api/bot every 5 s while the tab is open; the chart data every 30 s, or right away when a trade
+// closes so the line steps the moment it happens.
 async function refreshBot({ curve = false } = {}) {
   if (store.mode === 'preview') return;
   try {
     const r = await fetch('/api/bot');
     if (!r.ok) return;
     const b = await r.json();
-    const closedChanged = !!store.bot && b.record?.closed !== store.bot.record?.closed;
+    const prev = store.bot;
+    const closedChanged = !!prev && (b.record?.closed !== prev.record?.closed || b.live?.record?.closed !== prev.live?.record?.closed);
     store.bot = b;
-    const c = store.botCurve[store.botRange];
-    if (curve || closedChanged || !c || Date.now() - c.at > 30_000) await loadCurve(store.botRange);
+    if (!store.botGroupSet || !botGroups(b).includes(store.botGroup)) { store.botGroup = b.live ? 'live' : 'btc'; store.botGroupSet = true; }
+    const need = [['paper', store.botRange], ...(b.live ? [['live', store.botRange]] : [])];
+    await Promise.all(need.map(([mode, range]) => {
+      const c = store.botCurve[curveKey(mode, range)];
+      return curve || closedChanged || !c || Date.now() - c.at > 30_000 ? loadCurve(range, mode) : null;
+    }));
     renderBot();
   } catch {}
 }
@@ -551,7 +570,8 @@ function renderBot() {
     botBuilt = true;
     setupBotControls();
   }
-  $('#bot-groups').innerHTML = ['all', 'btc', 'hoops'].map((g) => `<button class="chip ${store.botGroup === g ? 'on' : ''}" data-group="${g}">${GROUP_LABEL[g]}</button>`).join('');
+  const groups = botGroups(b);
+  $('#bot-groups').innerHTML = groups.length > 1 ? groups.map((g) => `<button class="chip ${store.botGroup === g ? 'on' : ''}" data-group="${g}">${GROUP_LABEL[g]}</button>`).join('') : '';
   if (!botScrub) { paintBotHero(); drawBotChart(); }
   $('#bot-rest').innerHTML = botRest(b);
 }
@@ -569,8 +589,11 @@ function setupBotControls() {
     if (store.botRange === btn.dataset.range) return;
     store.botRange = btn.dataset.range;
     place();
-    const c = store.botCurve[store.botRange];
-    if (!c || Date.now() - c.at > 30_000) await loadCurve(store.botRange);
+    const modes = ['paper', ...(store.bot?.live ? ['live'] : [])];
+    await Promise.all(modes.map((m) => {
+      const c = store.botCurve[curveKey(m)];
+      return !c || Date.now() - c.at > 30_000 ? loadCurve(store.botRange, m) : null;
+    }));
     botAnimate = true;
     paintBotHero(); drawBotChart();
     $('#bot-rest').innerHTML = botRest(store.bot);
@@ -589,13 +612,15 @@ function setupBotControls() {
 // The line: realized P&L in the range, bucket by bucket, ending "now" with open positions marked
 // at what they'd sell for.
 function botSeries() {
-  const c = store.botCurve[store.botRange]?.data, b = store.bot;
+  const c = store.botCurve[curveKey()]?.data, b = store.bot;
   if (!c || !b) return null;
-  const g = store.botGroup;
+  const live = store.botGroup === 'live';
+  const g = live ? 'all' : store.botGroup;
   const ys = c[g] || [], ns = c.n?.[g] || [];
   const pts = [{ t: c.from, y: 0, n: 0 }];
   for (let i = 0; i < c.t.length; i++) pts.push({ t: c.t[i], y: ys[i] ?? 0, n: ns[i] ?? 0 });
-  const open = (b.positions || []).filter((p) => g === 'all' || groupOf(p.strategy) === g).reduce((s, p) => s + (p.upnl || 0), 0);
+  const positions = live ? b.live?.positions || [] : (b.positions || []).filter((p) => g === 'all' || groupOf(p.strategy) === g);
+  const open = positions.reduce((s, p) => s + (p.upnl || 0), 0);
   const now = Math.max(Date.now(), c.to);
   pts.push({ t: now, y: pts.at(-1).y + open, n: 0, now: true });
   return { pts, from: c.from, to: now, open, wins: c.wins?.[g] || 0, losses: c.losses?.[g] || 0 };
@@ -608,20 +633,25 @@ const botTime = (t) => (store.botRange === '1h' || store.botRange === '1d'
 function paintBotHero() {
   const b = store.bot, S = botSeries();
   if (!b) return;
-  const live = b.mode === 'live';
-  const group = store.botGroup === 'all' ? '' : ` · ${GROUP_LABEL[store.botGroup]}`;
-  $('#bot-label').innerHTML = `${live ? 'Bot account' : 'Paper test'} · ${BOT_RANGE_LABEL[store.botRange]}${esc(group)} <span class="pill ${live ? 'won' : 'open'}" style="vertical-align:2px;margin-left:4px">${live ? 'Live' : 'Paper'}</span>`;
-  const v = S ? S.pts.at(-1).y : (b.realized || 0) + (b.unrealized || 0);
+  const live = store.botGroup === 'live';
+  const pill = live
+    ? `<span class="pill ${b.live?.on ? 'won' : 'lost'}" style="vertical-align:2px;margin-left:4px">${b.live?.on ? 'Live' : 'Off'}</span>`
+    : '<span class="pill open" style="vertical-align:2px;margin-left:4px">Paper</span>';
+  $('#bot-label').innerHTML = `${live ? 'Real money' : GROUP_LABEL[store.botGroup]} · ${BOT_RANGE_LABEL[store.botRange]} ${pill}`;
+  const fallback = live ? (b.live?.realized || 0) + (b.live?.unrealized || 0) : (b.realized || 0) + (b.unrealized || 0);
+  const v = S ? S.pts.at(-1).y : fallback;
   const el = $('#bot-value');
   el.className = `hero-value num ${tone(v)}`;
   el.textContent = money(v, { sign: true });
   const parts = [];
+  if (live && b.live) parts.push(`<span>Account <b>${money(b.live.equity)}</b></span>`);
   if (S) {
     const n = S.wins + S.losses;
     parts.push(n ? `<span><b>${S.wins}–${S.losses}</b> on ${n} closed</span>` : '<span>Nothing closed in this range</span>');
     if (Math.abs(S.open) >= 0.005) parts.push(`<span>Open <b class="${tone(S.open)}">${money(S.open, { sign: true })}</b></span>`);
   }
-  if (!live) parts.push(`<span><b>${Object.keys(STRATEGY_LABEL).length}</b> strategies, <b>${money(b.allocation, { cents: false })}</b> each</span>`);
+  if (live && b.live) parts.push(`<span>Trading <b>${esc(variantOf(b.live.strategy))}</b></span>`);
+  if (!live) parts.push(`<span><b>${Object.keys(STRATEGY_LABEL).filter((id) => b.sports || groupOf(id) === 'btc').length}</b> strategies, <b>${money(b.allocation, { cents: false })}</b> each</span>`);
   $('#bot-sub').innerHTML = parts.join('');
 }
 
@@ -709,9 +739,22 @@ function calChart(math, market) {
   </svg>`;
 }
 
+// What the bot has learned so far, in three numbers: how much it trusts its math over the market,
+// how far each exchange reads from the official index, and how many trades the data check refused.
+function learnRows(m) {
+  const b = m?.basis, n = Math.max(b?.n?.cb || 0, b?.n?.kr || 0);
+  const reads = (name, v) => (v == null || Math.abs(v) < 0.005 ? `${name} on the index` : `${name} reads ${money(Math.abs(v))} ${v < 0 ? 'high' : 'low'}`);
+  const trust = m?.trust ?? 0.5;
+  return `<div class="learn">
+    <div class="learn-row"><span>Trust in the math</span><b>${pct(trust)}</b><small>${m?.ready ? 'Learned from the grading. It sizes every bet: more trust, bigger bets.' : 'Starting value. The grading sets it once 40 windows are in; it sizes every bet.'}</small></div>
+    <div class="learn-row"><span>Price check</span><b>${n ? `${reads('Coinbase', b.cb)} · ${reads('Kraken', b.kr)}` : 'Learning'}</b><small>${n ? `Lined up against ${n} official start prices; the bot shifts each feed onto the index.` : 'Each window start, Polymarket publishes the official price; the bot learns each exchange’s offset from it.'}</small></div>
+    <div class="learn-row"><span>Data check</span><b>${Number(m?.skips || 0).toLocaleString()} skipped</b><small>Trades where the math and the market were more than 15 points apart. That big a gap is almost always our data, not a gift.</small></div>
+  </div>`;
+}
+
 function modelCard(m) {
   if (!m || !m.windows) {
-    return `<div class="card empty"><h3>Grading starts soon</h3>Every 30 seconds the bot writes down what its math and the market said about each bitcoin window. When a window finishes, both get scored against what happened. The first real verdict comes after about 40 finished windows, roughly 3 hours.</div>`;
+    return `<div class="card pad model"><div class="model-verdict">Grading starts soon</div><div class="row-sub">Every 30 seconds the bot writes down what its math and the market said about each bitcoin window. When a window finishes, both get scored against what happened. The first real verdict comes after about 40 finished windows, roughly 3 hours.</div>${learnRows(m)}</div>`;
   }
   let verdict = 'Not enough to compare yet', cls = '';
   if (m.modelLoss != null && m.marketLoss != null) {
@@ -727,104 +770,161 @@ function modelCard(m) {
     <div class="row-sub">${m.windows} finished windows · ${Number(m.marks).toLocaleString()} checkpoints${ready ? '' : ` · early read, real verdict at ${m.need || 40} windows`}</div>
     ${calChart(m.buckets || [], m.marketBuckets || [])}
     <div class="model-foot"><span><i class="cal-key math"></i>Math</span><span><i class="cal-key mkt"></i>Market</span><span>Volatility ×${mult.toFixed(2)}${ready ? ' (self-tuned)' : ''}</span></div>
+    ${learnRows(m)}
   </div>`;
 }
 
-// What has to be true before real money: enough trades to tell skill from luck, the math beating
-// the market's own prices on finished windows, Polymarket's OK, and the order engine.
-function goLive(b, lineup) {
-  const btc = lineup.filter((x) => groupOf(x.strategy) === 'btc');
-  const trades = btc.reduce((s, x) => s + (x.closed || 0), 0);
-  const m = b.model;
-  const sharper = m && m.windows >= (m.need || 40) && m.modelLoss != null && m.marketLoss != null && m.modelLoss < m.marketLoss;
-  const items = [
-    [trades >= 200, 'Enough trades to trust it', `${trades} of 200 bitcoin trades closed`],
-    [!!sharper, 'Math beats the market', m?.windows ? `${m.windows} of ${m.need || 40} windows graded${m.windows >= (m.need || 40) ? (sharper ? ', math ahead' : ', market ahead so far') : ''}` : 'grading starts after the update'],
-    [false, 'Polymarket OK for API trading', 'their agreement asks for written approval first'],
-    [false, 'Live order engine', 'placing, tracking and cancelling real orders: next build'],
+// Ready for real money? Five checks on the strategy that would trade it. All green means it has
+// been consistent on paper; the switch is still Aaron's.
+function readyCard(r) {
+  if (!r) return '';
+  const need = r.need || { trades: 100, block: 30, maxDD: 0.2, edge: 0.01 };
+  const rows = [
+    ['math', 'The math beats the market', r.ok.math ? `${pct(r.sharper, 1)} sharper over ${r.windows} graded windows`
+      : r.windows < 40 ? `${r.windows} of 40 windows graded` : r.sharper == null ? 'Not scored yet' : `Needs ${pct(need.edge)} sharper; it's ${signedPct(r.sharper)}`],
+    ['trades', 'Enough trades', `${r.n} of ${need.trades} closed since the fix`],
+    ['profit', 'Making money', r.n ? `${money(r.pnl, { sign: true })} on ${money(r.staked)} bet` : 'No closed trades yet'],
+    ['steady', 'Consistent', r.blocks ? `Last ${need.block * 3} trades in blocks of ${need.block}: ${r.blocks.map((b) => money(b, { sign: true })).join(' · ')}` : `Needs ${need.block * 3} trades to split into three blocks`],
+    ['drawdown', 'Small drawdowns', r.n >= need.block ? `Worst drop from its high: ${pct(r.maxDD, 1)} (limit ${pct(need.maxDD)})` : `Needs ${need.block} trades`],
   ];
-  return `<div class="section">
-    <div class="section-title">Ready for real money?<small>${items.filter((i) => i[0]).length} of ${items.length}</small></div>
-    <div class="card">${items.map(([ok, t, sub]) => `<div class="row"><span class="check ${ok ? 'ok' : ''}">${ok ? '✓' : ''}</span><div class="row-main"><div class="row-title">${esc(t)}</div><div class="row-sub">${esc(sub)}</div></div></div>`).join('')}</div>
+  const done = rows.filter(([k]) => r.ok[k]).length;
+  return `<div class="card">
+    <div class="row"><div class="row-main"><div class="row-title">${r.ready ? 'Ready for real money' : `Not yet: ${done} of 5 checks`}</div><div class="row-sub wrap">${esc(variantOf(r.strategy) || r.strategy)} on paper since the fix. When all five are green it has been consistent. The switch is still yours.</div></div><div class="row-end"><span class="pill ${r.ready ? 'won' : 'open'}">${r.ready ? 'Ready' : 'Paper'}</span></div></div>
+    ${rows.map(([k, label, detail]) => `<div class="row check-row"><span class="check ${r.ok[k] ? 'ok' : ''}">${r.ok[k] ? '✓' : ''}</span><div class="row-main"><div class="row-title">${label}</div><div class="row-sub wrap">${esc(detail)}</div></div></div>`).join('')}
   </div>`;
+}
+
+// The risk ladder: where the account is now, and the rungs above it.
+function riskCard(k) {
+  if (!k) return '';
+  const rung = (at) => (at >= 1000 ? `$${(at / 1000).toLocaleString()}K` : `$${at}`);
+  const under = k.peak > 0 ? (k.peak - k.equity) / k.peak : 0;
+  const now = k.ladder.reduce((a, x) => (k.peak >= x.at ? x : a), k.ladder[0]);
+  return `<div class="card pad">
+    <div class="risk-now">Up to ${money(k.equity * k.bet)} a bet · ${money(Math.max(0, k.equity * k.open))} open at once</div>
+    <div class="row-sub wrap">${k.account === 'live' ? 'Real-money account' : `${esc(variantOf(store.bot?.ready?.strategy) || 'Paper account')}`} at ${money(k.equity)}, high ${money(k.peak)}. Floor ${money(k.floor)}: ${under > 0.0005 ? `it's ${pct(under, 1)} under its high, so bets run at ${pct(k.scale)} size` : 'at its high, so bets run at full size'}. Half way to the floor means half size; at the floor it stops.</div>
+    <table class="ladder"><thead><tr><th>Account</th><th>A bet</th><th>All open</th><th>Gives back</th></tr></thead><tbody>
+      ${k.ladder.map((x) => `<tr class="${x === now ? 'on' : ''}"><td>${rung(x.at)}</td><td>${pct(x.bet, x.bet < 0.02 ? 1 : 0)}</td><td>${pct(x.open)}</td><td>${pct(x.dd)}</td></tr>`).join('')}
+    </tbody></table>
+    <div class="row-sub wrap" style="margin-top:8px">Between rungs it slides smoothly. Kelly picks the bet inside these limits from the edge and the learned trust, so it bets what it wants until the ladder says enough.</div>
+  </div>`;
+}
+
+const posRow = (p) => {
+  const plan = [`in at ${cents(p.avg_entry)}`, p.adds ? `${p.adds} add${p.adds > 1 ? 's' : ''}` : null, p.take_profit ? `sells at ${cents(p.take_profit)}` : null, p.mode === 'live' ? null : variantOf(p.strategy) || null].filter(Boolean).join(' · ');
+  return `<div class="row with-badge">${badge(p.side_name || p.title)}<div class="row-main"><div class="row-title">${esc(p.side_name || p.side)}${p.qty ? ` <span class="faint">× ${Number(p.qty)}</span>` : ''}</div><div class="row-sub">${esc(plan)}</div></div><div class="row-end"><div class="row-amt">${cents(p.price)}</div><div class="row-meta ${p.upnl != null ? tone(p.upnl) : ''}">${p.upnl != null ? money(p.upnl, { sign: true }) : '–'}</div></div></div>`;
+};
+const histRow = (p) => {
+  const how = p.status === 'settled' ? (p.result ? 'Won' : 'Lost') : 'Sold';
+  const sub = [`in at ${cents(p.avg_entry)}`, p.adds ? `${p.adds} add${p.adds > 1 ? 's' : ''}` : null, p.close_price != null && p.avg_entry != null ? clvText(p) : null, p.mode === 'live' ? null : variantOf(p.strategy) || null].filter(Boolean).join(' · ');
+  return `<div class="row with-badge">${badge(p.side_name || p.title)}<div class="row-main"><div class="row-title">${how} · ${esc(p.side_name || p.side)}</div><div class="row-sub">${esc(sub)}</div></div><div class="row-end"><div class="row-amt ${tone(p.pnl || 0)}">${money(p.pnl || 0, { sign: true })}</div><div class="row-meta">${p.closed_at ? ago(new Date(p.closed_at).toISOString()) : ''}</div></div></div>`;
+};
+const sigRow = (s) => `<div class="row with-badge">${signalBadge(s.kind)}<div class="row-main"><div class="row-title">${esc(SIGNAL_LABEL[s.kind] || s.kind)}</div><div class="row-sub">${esc(s.detail || s.title || s.slug)}</div></div><div class="row-end"><div class="row-amt">${s.price != null ? cents(s.price) : ''}</div><div class="row-meta">${ago(new Date(s.ts).toISOString())}</div></div></div>`;
+const eventRow = (e) => `<div class="row with-badge event">${iconBadge(EVENT_ICON[e.kind] || EVENT_ICON.miss)}<div class="row-main"><div class="row-title">${esc(EVENT_LABEL[e.kind] || e.kind)}</div><div class="row-sub wrap">${esc(e.detail || '')}</div></div><div class="row-end"><div class="row-meta">${ago(new Date(e.ts).toISOString())}</div></div></div>`;
+
+// The real-money account: its numbers, positions, history and a log of every order in plain words.
+function liveSection(L) {
+  const losses = (L.record?.closed || 0) - (L.record?.wins || 0);
+  const tiles = [
+    { label: 'Account', value: money(L.equity), foot: `started ${money(store.bot.allocation, { cents: false })}` },
+    { label: 'Available', value: money(L.available), foot: `${money(L.atRisk)} in ${L.positions.length} open` },
+    { label: 'Record', value: L.record?.closed ? `${L.record.wins}–${losses}` : '–', foot: 'closed, real money' },
+    { label: 'Realized', value: money(L.realized || 0, { sign: true }), cls: tone(L.realized || 0), foot: 'after fees, before rebates' },
+  ];
+  return `
+    <div class="section"><div class="stats">${tiles.map(statTile).join('')}</div></div>
+    ${L.on ? '' : `<div class="section"><div class="card pad off-note"><b>Real trading is off.</b> Open positions ride to their result; set LIVE_TRADING to on in Cloudflare to start again.</div></div>`}
+    <div class="section">
+      <div class="section-title">Open · real money<small>${L.positions.length ? 'live prices' : ''}</small></div>
+      ${L.positions.length ? `<div class="card">${L.positions.map(posRow).join('')}</div>`
+        : `<div class="card empty"><h3>No open positions</h3>${L.on ? `Trading ${esc(variantOf(L.strategy))}. When it buys, the position shows up here.` : 'Real trading is off.'}</div>`}
+    </div>
+    <div class="section">
+      <div class="section-title">What it did<small>every order, in order</small></div>
+      ${L.events.length ? `<div class="card">${L.events.slice(0, 25).map(eventRow).join('')}</div>`
+        : `<div class="card empty"><h3>Nothing yet</h3>Its first move will be an order check with Polymarket, then a real buy when the math finds a mispriced window.</div>`}
+    </div>
+    <div class="section">
+      <div class="section-title">History · real money<small>${L.history.length ? `last ${Math.min(50, L.history.length)}` : ''}</small></div>
+      ${L.history.length ? `<div class="card">${L.history.slice(0, 50).map(histRow).join('')}</div>`
+        : `<div class="card empty"><h3>Nothing closed yet</h3>Every closed real-money position lands here with its result and P&L after fees.</div>`}
+    </div>`;
 }
 
 function botRest(b) {
-  const live = b.mode === 'live';
+  const L = b.live;
   const losses = (b.record?.closed || 0) - (b.record?.wins || 0);
-  const posRow = (p) => {
-    const plan = [`in at ${cents(p.avg_entry)}`, p.adds ? `${p.adds} add${p.adds > 1 ? 's' : ''}` : null, p.take_profit ? `sells at ${cents(p.take_profit)}` : null, variantOf(p.strategy) || null].filter(Boolean).join(' · ');
-    return `<div class="row with-badge">${badge(p.side_name || p.title)}<div class="row-main"><div class="row-title">${esc(p.side_name || p.side)}</div><div class="row-sub">${esc(plan)}</div></div><div class="row-end"><div class="row-amt">${cents(p.price)}</div><div class="row-meta ${p.upnl != null ? tone(p.upnl) : ''}">${p.upnl != null ? money(p.upnl, { sign: true }) : '–'}</div></div></div>`;
-  };
-  const histRow = (p) => {
-    const how = p.status === 'settled' ? (p.result ? 'Won' : 'Lost') : 'Sold';
-    const sub = [`in at ${cents(p.avg_entry)}`, p.adds ? `${p.adds} add${p.adds > 1 ? 's' : ''}` : null, p.close_price != null && p.avg_entry != null ? clvText(p) : null, variantOf(p.strategy) || null].filter(Boolean).join(' · ');
-    return `<div class="row with-badge">${badge(p.side_name || p.title)}<div class="row-main"><div class="row-title">${how} · ${esc(p.side_name || p.side)}</div><div class="row-sub">${esc(sub)}</div></div><div class="row-end"><div class="row-amt ${tone(p.pnl || 0)}">${money(p.pnl || 0, { sign: true })}</div><div class="row-meta">${p.closed_at ? ago(new Date(p.closed_at).toISOString()) : ''}</div></div></div>`;
-  };
-  const sigRow = (s) => `<div class="row with-badge">${signalBadge(s.kind)}<div class="row-main"><div class="row-title">${esc(SIGNAL_LABEL[s.kind] || s.kind)}</div><div class="row-sub">${esc(s.detail || s.title || s.slug)}</div></div><div class="row-end"><div class="row-amt">${s.price != null ? cents(s.price) : ''}</div><div class="row-meta">${ago(new Date(s.ts).toISOString())}</div></div></div>`;
-
   // Each paper strategy runs its own account; the sparkline is its P&L over the chart's range.
-  const strat = store.botCurve[store.botRange]?.data?.strat || {};
-  const lineup = Object.keys(STRATEGY_LABEL).map((id) => ({ strategy: id, closed: 0, wins: 0, open: 0, pnl: 0, staked: 0, ...((b.byStrategy || []).find((x) => x.strategy === id) || {}) }));
+  const strat = store.botCurve[curveKey('paper')]?.data?.strat || {};
+  const ids = Object.keys(STRATEGY_LABEL).filter((id) => b.sports || groupOf(id) === 'btc');
+  const lineup = ids.map((id) => ({ strategy: id, closed: 0, wins: 0, open: 0, pnl: 0, staked: 0, ...((b.byStrategy || []).find((x) => x.strategy === id) || {}) }));
   const leader = lineup.filter((x) => x.closed).sort((x, y) => y.pnl - x.pnl)[0];
-  const tiles = live ? [
-    { label: 'Available', value: money(b.available), foot: 'for new bets' },
-    { label: 'At risk', value: money(b.atRisk), foot: `${b.positions.length} open` },
-    { label: 'Record', value: b.record?.closed ? `${b.record.wins}–${losses}` : '–', foot: 'closed positions' },
-    { label: 'Realized', value: money(b.realized || 0, { sign: true }), cls: tone(b.realized || 0), foot: 'after fees' },
-  ] : [
+  const tiles = [
     { label: 'Open', value: String(b.positions.length), foot: `${money(b.atRisk)} at risk` },
-    { label: 'Record', value: b.record?.closed ? `${b.record.wins}–${losses}` : '–', foot: 'all closed, all time' },
-    { label: 'Realized', value: money(b.realized || 0, { sign: true }), cls: tone(b.realized || 0), foot: 'after fees, all time' },
+    { label: 'Record', value: b.record?.closed ? `${b.record.wins}–${losses}` : '–', foot: 'all paper, all time' },
+    { label: 'Realized', value: money(b.realized || 0, { sign: true }), cls: tone(b.realized || 0), foot: 'paper, after fees' },
     { label: 'Leading', value: leader ? money(leader.pnl, { sign: true }) : '–', cls: leader ? tone(leader.pnl) : '', foot: leader ? variantOf(leader.strategy) || leader.strategy : 'no closed trades yet' },
   ];
   const stratGroup = (g, title) => {
     const rows = lineup.filter((x) => groupOf(x.strategy) === g);
+    if (!rows.length) return '';
     const total = rows.reduce((s, x) => s + (x.pnl || 0), 0);
     return `<div class="group-head" style="display:flex;justify-content:space-between"><span>${title}</span><span class="num ${tone(total)}">${money(total, { sign: true })}</span></div>
-      <div class="card">${rows.map((x) => `<div class="row"><div class="row-main"><div class="row-title">${esc(variantOf(x.strategy))}</div><div class="row-sub">${x.closed ? `${x.wins}–${x.closed - x.wins} · ${x.staked ? signedPct(x.pnl / x.staked) : '–'} on ${money(x.staked)}` : 'No closed trades yet'}${x.open ? ` · ${x.open} open` : ''}</div></div><div class="row-end strat-end">${spark(strat[x.strategy])}<div class="row-amt ${tone(x.pnl)}">${money(x.pnl, { sign: true })}</div></div></div>`).join('')}</div>`;
+      <div class="card">${rows.map((x) => `<div class="row"><div class="row-main"><div class="row-title">${esc(variantOf(x.strategy))}${L && L.strategy === x.strategy ? ' <span class="pill won">Real money</span>' : ''}</div><div class="row-sub">${x.closed ? `${x.wins}–${x.closed - x.wins} · ${x.staked ? signedPct(x.pnl / x.staked) : '–'} on ${money(x.staked)}` : 'No closed trades yet'}${x.open ? ` · ${x.open} open` : ''}</div></div><div class="row-end strat-end">${spark(strat[x.strategy])}<div class="row-amt ${tone(x.pnl)}">${money(x.pnl, { sign: true })}</div></div></div>`).join('')}</div>`;
   };
+  const showLive = L && store.botGroup === 'live';
 
   return `
-    <div class="section"><div class="stats">${tiles.map(statTile).join('')}</div></div>
+    ${showLive ? liveSection(L) : ''}
+
+    ${L?.on ? '' : `<div class="section">
+      <div class="section-title">Ready for real money?<small>${esc(variantOf(b.ready?.strategy) || '')}</small></div>
+      ${readyCard(b.ready)}
+    </div>`}
 
     <div class="section">
       <div class="section-title">Bitcoin model check<small>math vs market</small></div>
       ${modelCard(b.model)}
     </div>
-    ${live ? '' : goLive(b, lineup)}
 
     <div class="section">
-      <div class="section-title">By strategy<small>${live ? 'results' : `each its own ${money(b.allocation, { cents: false })}`}</small></div>
+      <div class="section-title">Risk ladder<small>grows the account, protects the high</small></div>
+      ${riskCard(b.risk)}
+    </div>
+
+    <div class="section">
+      <div class="section-title">Paper strategies<small>each its own ${money(b.allocation, { cents: false })}</small></div>
+      <div class="stats" style="margin-bottom:6px">${tiles.map(statTile).join('')}</div>
       ${stratGroup('btc', 'Bitcoin')}
-      ${stratGroup('hoops', 'Basketball')}
+      ${b.sports ? stratGroup('hoops', 'Basketball') : ''}
     </div>
 
-    <div class="section">
-      <div class="section-title">Open<small>${b.positions.length ? 'live prices' : ''}</small></div>
+    ${showLive ? '' : `<div class="section">
+      <div class="section-title">Open · paper<small>${b.positions.length ? 'live prices' : ''}</small></div>
       ${b.positions.length ? `<div class="card">${b.positions.map(posRow).join('')}</div>`
-        : `<div class="card empty"><h3>No open positions</h3>When the bot buys, the position shows up here with its live price and P&L.</div>`}
+        : `<div class="card empty"><h3>No open paper positions</h3>When a paper strategy buys, it shows up here with its live price and P&L.</div>`}
     </div>
-
     <div class="section">
-      <div class="section-title">History<small>${b.history.length ? `last ${Math.min(50, b.history.length)}` : ''}</small></div>
+      <div class="section-title">History · paper<small>${b.history.length ? `last ${Math.min(50, b.history.length)}` : ''}</small></div>
       ${b.history.length ? `<div class="card">${b.history.slice(0, 50).map(histRow).join('')}</div>`
-        : `<div class="card empty"><h3>Nothing closed yet</h3>Every closed position lands here with its result and P&L after fees.</div>`}
-    </div>
+        : `<div class="card empty"><h3>Nothing closed yet</h3>Every closed paper position lands here with its result and P&L after fees.</div>`}
+    </div>`}
 
     <div class="section">
       <div class="section-title">Bot's eye<small>what it's flagging</small></div>
       ${b.signals.length ? `<div class="card">${b.signals.slice(0, 20).map(sigRow).join('')}</div>`
-        : `<div class="card empty"><h3>Nothing flagged yet</h3>It watches every live game and the bitcoin windows, and flags the moments worth a look.</div>`}
+        : `<div class="card empty"><h3>Nothing flagged yet</h3>It watches the bitcoin windows and flags the moments worth a look.</div>`}
     </div>
 
     <div class="section">
       <div class="section-title">The rules</div>
       <div class="card steps">
         <div class="step"><div><b>Never deposits</b>Only you add money. The bot has no way to.</div></div>
-        <div class="step"><div><b>Its own ${money(b.allocation, { cents: false })}</b>It trades its bankroll plus what it wins. Your money and your bets are off limits.</div></div>
-        <div class="step"><div><b>Paper until you say go</b>Live trading stays off until you switch it on and Polymarket approves API trading.</div></div>
-        <div class="step"><div><b>Bets grow with the account</b>Sized off what the account is worth now, so $100 that grows to $10,000 bets a hundred times bigger, and losses shrink the bets. Never more than a sixth of the account on one bitcoin window or a third on one game, never more than the market can fill, and a stop for the day after losing a third. Your own cap per bet (BOT_MAX_BET) beats all of it.</div></div>
+        <div class="step"><div><b>Its own ${money(b.allocation, { cents: false })}</b>It trades its bankroll plus what it wins. Your money and your bets are off limits, and it skips any window where you hold a position or have orders.</div></div>
+        <div class="step"><div><b>Your switch</b>Real orders only while LIVE_TRADING is on in Cloudflare. Turn it off and it stops placing orders right away; open positions ride to their result.</div></div>
+        <div class="step"><div><b>Never pays more than it saw</b>Every buy is a limit order at the price it saw, cancelled if it doesn't fill on the spot. It checks its first order with Polymarket's preview before placing anything real.</div></div>
+        <div class="step"><div><b>Bets grow with the account, inside the ladder</b>Sized off what the account is worth now and how much the grading trusts the math. Small accounts can bet up to 10% at a time; by $100K it's 1.5%. Below its high, bets shrink in step toward a floor, so a bad run can't dig a deep hole. Never more than the market can fill. Your own cap per bet (BOT_MAX_BET) beats all of it.</div></div>
+        <div class="step"><div><b>Checks its data first</b>It only trades on a price fresh off a live exchange stream, lined up with the official index. If its math and the market are more than 15 points apart it skips the trade, and after a losing exit it stays out of that window.</div></div>
       </div>
     </div>`;
 }
@@ -841,11 +941,12 @@ function renderLab() {
       <div class="row"><div class="row-main"><div class="row-title">Polymarket API</div><div class="row-sub">${!live ? 'Preview copy' : configured ? 'Key saved in Cloudflare' : 'No key yet'}</div></div><div class="row-end"><span class="pill ${configured && live ? 'won' : 'open'}">${configured && live ? 'Connected' : 'Not connected'}</span></div></div>
       <div class="row"><div class="row-main"><div class="row-title">Last sync</div><div class="row-sub">${last ? `${last.ok ? 'OK' : 'Failed'}${last.added ? ` · ${last.added} new` : ''}${last.msg && !last.ok ? ` · ${esc(last.msg).slice(0, 80)}` : ''}` : 'Never'}</div></div><div class="row-end dim" style="font-size:15px">${last ? ago(last.t) : '–'}</div></div>
       <div class="row"><div class="row-main"><div class="row-title">Auto sync</div><div class="row-sub">Runs on Cloudflare, phone can stay closed</div></div><div class="row-end dim" style="font-size:15px">Every 15 min</div></div>
-      <div class="row"><div class="row-main"><div class="row-title">Live game feed</div><div class="row-sub">${st.live?.now ? `${st.live.now} live · ${st.live.focus || 0} in focus · ` : 'Waiting for games · '}${Number(st.live?.ticks || 0).toLocaleString()} price ticks</div></div><div class="row-end dim" style="font-size:15px">${st.live?.last ? ago(st.live.last) : 'Every 5 s'}</div></div>
+      ${st.money?.sports ? '' : '<!-- sports off -->'}<div class="row" ${st.money?.sports ? '' : 'hidden'}><div class="row-main"><div class="row-title">Live game feed</div><div class="row-sub">${st.live?.now ? `${st.live.now} live · ${st.live.focus || 0} in focus · ` : 'Waiting for games · '}${Number(st.live?.ticks || 0).toLocaleString()} price ticks</div></div><div class="row-end dim" style="font-size:15px">${st.live?.last ? ago(st.live.last) : 'Every 5 s'}</div></div>
       <div class="row"><div class="row-main"><div class="row-title">Bot's eye</div><div class="row-sub">${st.live?.lastSignal ? `${esc(SIGNAL_LABEL[st.live.lastSignal.kind] || st.live.lastSignal.kind)} · ${esc(st.live.lastSignal.detail || st.live.lastSignal.title || '')}` : 'Flags favorites fading, big swings, cheap spikes, close finishes'}</div></div><div class="row-end dim" style="font-size:15px">${Number(st.live?.signals || 0).toLocaleString()} flagged</div></div>
       <div class="row"><div class="row-main"><div class="row-title">Game data</div><div class="row-sub">${Number(st.live?.states || 0).toLocaleString()} score updates · ${Number(st.live?.lines || 0).toLocaleString()} closing lines</div></div><div class="row-end dim" style="font-size:15px">ESPN</div></div>
-      <div class="row"><div class="row-main"><div class="row-title">Live prices</div><div class="row-sub">${st.crypto?.stream ? `Polymarket ${st.crypto.stream.toFixed(1)}/s` : 'Polymarket stream offline, polling every 5 s'} · ${st.crypto?.ticker ? `bitcoin ${Number(st.crypto.ticker).toFixed(1)}/s from Coinbase` : 'bitcoin ticker offline'}</div></div><div class="row-end"><span class="pill ${st.crypto?.stream && st.crypto?.ticker ? 'won' : 'open'}">${st.crypto?.stream && st.crypto?.ticker ? 'Live' : st.crypto?.stream || st.crypto?.ticker ? 'Partly live' : 'Polling'}</span></div></div>
-      <div class="row"><div class="row-main"><div class="row-title">Crypto windows</div><div class="row-sub">${st.crypto?.btc ? `BTC ${money(st.crypto.btc, { cents: false })} · 5m 15m 1h · ` : 'Bitcoin Up or Down · '}${Number(st.crypto?.ticks || 0).toLocaleString()} ticks · volatility ×${Number(st.crypto?.volScale || 1).toFixed(2)}</div></div><div class="row-end dim" style="font-size:15px">${st.crypto?.at ? ago(st.crypto.at) : 'Every 5 s'}</div></div>
+      <div class="row"><div class="row-main"><div class="row-title">Real-money trading</div><div class="row-sub">${st.money?.on ? `${esc(variantOf(st.money.strategy))} · ` : 'Off · '}${st.money?.last ? esc(String(st.money.last.detail || '').slice(0, 90)) : 'no orders yet'}</div></div><div class="row-end"><span class="pill ${st.money?.on ? 'won' : 'open'}">${st.money?.on ? 'On' : 'Off'}</span></div></div>
+      <div class="row"><div class="row-main"><div class="row-title">Live prices</div><div class="row-sub">${st.crypto?.stream ? `Polymarket ${st.crypto.stream.toFixed(1)}/s` : 'Polymarket stream offline, polling every 5 s'} · ${st.crypto?.kraken ? `Kraken ${Number(st.crypto.kraken).toFixed(1)}/s` : 'Kraken offline'} · ${st.crypto?.ticker ? `Coinbase ${Number(st.crypto.ticker).toFixed(1)}/s` : 'Coinbase quiet'}</div></div><div class="row-end"><span class="pill ${st.crypto?.stream && (st.crypto?.ticker || st.crypto?.kraken) ? 'won' : 'open'}">${st.crypto?.stream && (st.crypto?.ticker || st.crypto?.kraken) ? 'Live' : st.crypto?.stream || st.crypto?.ticker || st.crypto?.kraken ? 'Partly live' : 'Polling'}</span></div></div>
+      <div class="row"><div class="row-main"><div class="row-title">Crypto windows</div><div class="row-sub">${st.crypto?.btc ? `BTC ${money(st.crypto.btc, { cents: false })} · 5m 15m 1h · ` : 'Bitcoin Up or Down · '}${Number(st.crypto?.ticks || 0).toLocaleString()} ticks · volatility ×${Number(st.crypto?.volScale || 1).toFixed(2)} · trust ${pct(st.crypto?.trust ?? 0.5)} · ${Number(st.crypto?.skipped || 0).toLocaleString()} skipped by the data check</div></div><div class="row-end dim" style="font-size:15px">${st.crypto?.at ? ago(st.crypto.at) : 'Every 5 s'}</div></div>
       <div class="row"><div class="row-main"><div class="row-title">Market recorder</div><div class="row-sub">${st.recorder ? `${st.recorder.games} games tracked · ${Number(st.recorder.totalPoints || 0).toLocaleString()} price points` : 'Starting up'}</div></div><div class="row-end dim" style="font-size:15px">${st.recorder?.last ? ago(st.recorder.last) : '–'}</div></div>
     </div>
     <div style="margin-top:12px"><button class="btn" id="lab-sync">Sync now</button></div>`;

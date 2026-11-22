@@ -40,7 +40,7 @@ const FLUSH_EVERY = 60_000;
 const MAX_SLEEP = 5 * 60_000;
 const MIN = 60_000;
 
-interface LiveEnv { DB: D1Database; BOT_ALLOCATION?: string; BOT_MAX_BET?: string }
+interface LiveEnv { DB: D1Database; BOT_ALLOCATION?: string; BOT_MAX_BET?: string; SPORTS?: string }
 // Aaron's own cap per bet, when he's set one (a Cloudflare variable). None by default in paper.
 const ceiling = (env: LiveEnv): number | null => { const v = Number(env.BOT_MAX_BET); return v > 0 ? v : null; };
 
@@ -165,14 +165,17 @@ export class LiveFeed extends DurableObject<LiveEnv> {
   private open: Position[] = [];                             // open basketball paper positions
   private openAt = 0;
 
-  // The minute cron calls this so the loop restarts if it ever stopped.
+  // The minute cron calls this so the loop restarts if it ever stopped. Sports are off unless
+  // SPORTS=on (Aaron, Nov 22: the bot trades bitcoin only), so by default the loop stays asleep.
   async fetch(_req: Request): Promise<Response> {
+    if (this.env.SPORTS !== 'on') { await this.ctx.storage.deleteAlarm(); return Response.json({ ok: true, sports: 'off' }); }
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm == null || alarm > Date.now() + MAX_SLEEP) await this.ctx.storage.setAlarm(Date.now() + 1_000);
     return Response.json({ ok: true, alarm, live: this.reportedLive });
   }
 
   async alarm(): Promise<void> {
+    if (this.env.SPORTS !== 'on') { await this.ctx.storage.deleteAlarm(); return; }
     const now = Date.now();
     let active = 0;
     try {
