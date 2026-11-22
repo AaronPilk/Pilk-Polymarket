@@ -15,7 +15,8 @@ interface Env extends PmEnv {
   BOT_MAX_BET?: string;     // Aaron's cap per bet in dollars (none by default; bets grow with the account)
   BTC_STREAM?: string;      // "off" turns the live bitcoin streams off
   LIVE_STRATEGY?: string;   // which bitcoin strategy trades real money (default crypto_fair_v1)
-  SPORTS?: string;          // "on" brings back the sports feed, recorder and basketball paper traders (off: bitcoin only)
+  SPORTS?: string;          // "off" puts the Sports bot to sleep (game feed, recorder, basketball paper traders); on by default
+  SPORTS_STRATEGY?: string; // which sports strategy its readiness card follows (default hoops_trailer_v1, Aaron's style)
   LIVE_TRADING?: string;    // "on" lets the bot place real orders with its live account (Aaron sets it; default off)
   DASH_PASSWORD?: string;   // wrangler secret put DASH_PASSWORD
   SESSION_SECRET?: string;  // wrangler secret put SESSION_SECRET (any long random string)
@@ -44,7 +45,7 @@ export default {
       if (url.pathname === '/api/activities' && req.method === 'GET') return json(await listActivities(env));
       if (url.pathname === '/api/state' && req.method === 'GET') return json(await state(env));
       if (url.pathname === '/api/sync' && req.method === 'POST') return json(await sync(env));
-      if (url.pathname === '/api/bot' && req.method === 'GET') return json(await bot(env));
+      if (url.pathname === '/api/bot' && req.method === 'GET') return json(await bot(env, url.searchParams.get('book') === 'sports' ? 'sports' : 'btc'));
       if (url.pathname === '/api/bot/curve' && req.method === 'GET') return json(await botCurve(env, url.searchParams.get('range') || '1d', url.searchParams.get('mode') === 'live' ? 'live' : 'paper'));
       if (url.pathname === '/api/paper') {
         if (req.method === 'GET') return json(await listPaper(env));
@@ -65,13 +66,12 @@ export default {
     return res;
   },
 
-  // Cron runs every minute: keep the bitcoin engine's loop alive. Account sync every 15 minutes.
-  // Sports (the live game feed, the minute price recorder, game settlement) only with SPORTS=on;
-  // the bot trades bitcoin only.
+  // Cron runs every minute: keep both bots' loops alive. Account sync every 15 minutes. The Sports
+  // bot (game feed, minute price recorder, game settlement) sleeps with SPORTS=off.
   async scheduled(evt: ScheduledController, env: Env, ctx: ExecutionContext) {
     const now = new Date(evt.scheduledTime);
     const fullTick = now.getUTCMinutes() % 15 === 0;
-    const sports = env.SPORTS === 'on';
+    const sports = env.SPORTS !== 'off';
     ctx.waitUntil(env.CRYPTO.get(env.CRYPTO.idFromName('btc')).fetch('https://crypto/kick').catch(() => undefined));
     // The live feed is told on every tick: with sports off it clears its own alarm and stays asleep.
     ctx.waitUntil(env.LIVE.get(env.LIVE.idFromName('live')).fetch('https://live/kick').catch(() => undefined));
@@ -136,7 +136,7 @@ async function state(env: Env) {
       skipped: S.gap_skips?.n ?? 0,
     },
     money: {
-      on: env.LIVE_TRADING === 'on', strategy: env.LIVE_STRATEGY || 'crypto_fair_v1', sports: env.SPORTS === 'on',
+      on: env.LIVE_TRADING === 'on', strategy: env.LIVE_STRATEGY || 'crypto_fair_v1', sports: env.SPORTS !== 'off',
       last: await env.DB.prepare('SELECT ts, kind, detail FROM live_events ORDER BY ts DESC LIMIT 1').first<{ ts: number; kind: string; detail: string }>().catch(() => null),
     },
     snapshot: snap ? { t: snap.t, cash: snap.cash, positions: snap.positions, portfolio: snap.portfolio, reserved: snap.reserved } : null,
@@ -147,14 +147,20 @@ async function state(env: Env) {
 
 // ---------- the bot's own ledger (never mixed with Aaron's trades)
 
-async function bot(env: Env) {
+// Two bots, one database, separate books. Every trade row carries its strategy, and the prefix
+// says whose it is: crypto_ = the Bitcoin bot, hoops_ = the Sports bot. Each bot has its own paper
+// lineup, its own learning, risk ladder and readiness card (and the Bitcoin bot its live account),
+// and nothing here ever adds the two together, except the head-to-head, which compares them.
+const BOOKS = { btc: 'crypto_%', sports: 'hoops_%' } as const;
+type Book = keyof typeof BOOKS;
+
+async function bot(env: Env, book: Book) {
   const allocation = Number(env.BOT_ALLOCATION || 100) || 100;
   const liveOn = env.LIVE_TRADING === 'on';
-  const sports = env.SPORTS === 'on';
+  const sports = env.SPORTS !== 'off';
   const q = async <T>(sql: string, ...args: unknown[]): Promise<T[]> =>
     (await env.DB.prepare(sql).bind(...args).all<T>().catch(() => ({ results: [] as T[] }))).results;
-  // With sports off, the paper side shows bitcoin only (old basketball rows stay in the database).
-  const scope = sports ? '' : " AND strategy LIKE 'crypto_%'";
+  const scope = ` AND strategy LIKE '${BOOKS[book]}'`;
 
   // One account's view: open positions marked at what they'd sell for, history, totals.
   const block = async (mode: 'paper' | 'live') => {
@@ -187,47 +193,79 @@ async function bot(env: Env) {
   };
 
   const paper = await block('paper');
-  const anyLive = (await q<{ n: number }>("SELECT COUNT(*) AS n FROM bot_positions WHERE mode = 'live'"))[0]?.n || 0;
-  const events = await q<any>('SELECT ts, kind, slug, detail FROM live_events ORDER BY ts DESC LIMIT 40');
-  const live = liveOn || anyLive || events.length
-    ? { on: liveOn, strategy: env.LIVE_STRATEGY || 'crypto_fair_v1', ...(await block('live')), events }
-    : null;
   const byStrategy = await q<any>(`SELECT strategy,
       SUM(status != 'open') AS closed, SUM(status != 'open' AND pnl > 0) AS wins, SUM(status = 'open') AS open,
       COALESCE(SUM(CASE WHEN status != 'open' THEN pnl END), 0) AS pnl,
       COALESCE(SUM(CASE WHEN status != 'open' THEN cost END), 0) AS staked
     FROM bot_positions WHERE mode = 'paper'${scope} GROUP BY strategy ORDER BY strategy`);
+  const isBtcSlug = "(s.slug LIKE 'cpc-btc-%' OR s.slug LIKE 'btc-above-%')";
   const signals = await q<any>(`SELECT s.slug, s.ts, s.kind, s.side, s.price, s.ref, s.detail, m.title, m.league
-    FROM signals s LEFT JOIN markets m ON m.slug = s.slug ${sports ? '' : "WHERE s.slug LIKE 'cpc-btc-%'"} ORDER BY s.ts DESC LIMIT 30`);
-  // What the bitcoin model has learned: its latest self-grading (every half hour), each exchange's
-  // offset to the official index (every window start), and the trades the data check refused.
-  const brainRows = await q<{ k: string; v: string; at: number }>("SELECT k, v, at FROM brain WHERE k IN ('btc_model', 'btc_basis')");
-  const fromBrain = (k: string) => {
-    const r = brainRows.find((x) => x.k === k);
-    try { return r ? { ...JSON.parse(r.v), at: r.at } : null; } catch { return null; }
-  };
-  const graded = fromBrain('btc_model'), basis = fromBrain('btc_basis');
-  const skips = (await q<{ n: number }>("SELECT n FROM stats WHERE k = 'gap_skips'"))[0]?.n || 0;
-  const model = { ...(graded || {}), basis, skips };
+    FROM signals s LEFT JOIN markets m ON m.slug = s.slug WHERE ${book === 'btc' ? isBtcSlug : `NOT ${isBtcSlug}`} ORDER BY s.ts DESC LIMIT 30`);
 
-  // Ready for real money? The record of the strategy that would trade it, on the fixed engine
-  // (trades carrying the feed record, Nov 22 on), plus the grading's verdict on the math.
-  const liveId = env.LIVE_STRATEGY || 'crypto_fair_v1';
-  const readyRows = await q<{ pnl: number; cost: number }>(`SELECT pnl, cost FROM bot_positions
-    WHERE mode = 'paper' AND strategy = ? AND status != 'open' AND json_extract(meta, '$.feeds') IS NOT NULL ORDER BY closed_at`, liveId);
-  const ready = { strategy: liveId, ...readiness(readyRows, allocation, graded) };
+  let live = null, model = null, ready = null, riskFor: { strategy?: string; mode: 'paper' | 'live' };
+  if (book === 'btc') {
+    // The Bitcoin bot's real-money account (only bitcoin has a live engine so far).
+    const anyLive = (await q<{ n: number }>(`SELECT COUNT(*) AS n FROM bot_positions WHERE mode = 'live'${scope}`))[0]?.n || 0;
+    const events = await q<any>('SELECT ts, kind, slug, detail FROM live_events ORDER BY ts DESC LIMIT 40');
+    live = liveOn || anyLive || events.length
+      ? { on: liveOn, strategy: env.LIVE_STRATEGY || 'crypto_fair_v1', ...(await block('live')), events }
+      : null;
+    // What the bitcoin model has learned: its latest self-grading (every half hour), each
+    // exchange's offset to the official index (every window start), trades the data check refused.
+    const brainRows = await q<{ k: string; v: string; at: number }>("SELECT k, v, at FROM brain WHERE k IN ('btc_model', 'btc_basis')");
+    const fromBrain = (k: string) => {
+      const r = brainRows.find((x) => x.k === k);
+      try { return r ? { ...JSON.parse(r.v), at: r.at } : null; } catch { return null; }
+    };
+    const graded = fromBrain('btc_model'), basis = fromBrain('btc_basis');
+    const skips = (await q<{ n: number }>("SELECT n FROM stats WHERE k = 'gap_skips'"))[0]?.n || 0;
+    model = { ...(graded || {}), basis, skips };
+    // Ready for real money? The strategy that would trade it, on the fixed engine (trades carrying
+    // the feed record, Nov 22 on), plus the grading's verdict on the math.
+    const liveId = env.LIVE_STRATEGY || 'crypto_fair_v1';
+    const rows = await q<{ pnl: number; cost: number }>(`SELECT pnl, cost FROM bot_positions
+      WHERE mode = 'paper' AND strategy = ? AND status != 'open' AND json_extract(meta, '$.feeds') IS NOT NULL ORDER BY closed_at`, liveId);
+    ready = { strategy: liveId, ...readiness(rows, allocation, graded) };
+    riskFor = live?.record?.closed ? { mode: 'live' } : { strategy: liveId, mode: 'paper' };
+  } else {
+    // The Sports bot: paper only. Its card follows one strategy (Aaron's style by default) and
+    // counts different games, since several trades in one game are one bet on that game.
+    const id = env.SPORTS_STRATEGY || 'hoops_trailer_v1';
+    const rows = await q<{ pnl: number; cost: number }>(`SELECT pnl, cost FROM bot_positions
+      WHERE mode = 'paper' AND strategy = ? AND status != 'open' ORDER BY closed_at`, id);
+    const games = (await q<{ n: number }>(`SELECT COUNT(DISTINCT market_slug) AS n FROM bot_positions WHERE mode = 'paper' AND strategy = ? AND status != 'open'`, id))[0]?.n || 0;
+    ready = { strategy: id, ...readiness(rows, allocation, null, { kind: 'sports', games }) };
+    riskFor = { strategy: id, mode: 'paper' };
+  }
 
-  // Where that account sits on the risk ladder right now (the live account once it trades).
-  const acct = await bankroll(env.DB, allocation, Date.now(), live?.record?.closed ? undefined : liveId, live?.record?.closed ? 'live' : 'paper');
+  // Where that account sits on the risk ladder right now.
+  const acct = await bankroll(env.DB, allocation, Date.now(), riskFor.strategy, riskFor.mode);
   const lim = riskLimits(acct.peak);
   const risk = {
-    account: live?.record?.closed ? 'live' : 'paper', equity: acct.equity, peak: acct.peak, openNet: acct.openNet,
+    account: riskFor.mode, strategy: riskFor.strategy ?? null, equity: acct.equity, peak: acct.peak, openNet: acct.openNet,
     floor: acct.peak * (1 - lim.dd), scale: drawdownScale(acct.equity, acct.peak, lim.dd), ...lim,
     ladder: RISK_LADDER,
   };
+
+  // Head to head: both bots on equal terms (paper, since both started on Nov 22).
+  const compare: Record<string, unknown> = {};
+  for (const k of Object.keys(BOOKS) as Book[]) {
+    const r = (await q<any>(`SELECT COUNT(*) AS n, SUM(pnl > 0) AS wins, COALESCE(SUM(pnl), 0) AS pnl, COALESCE(SUM(cost), 0) AS staked,
+        COUNT(DISTINCT strategy) AS strategies, COUNT(DISTINCT market_slug) AS markets, MIN(opened_at) AS since
+      FROM bot_positions WHERE mode = 'paper' AND status != 'open' AND strategy LIKE ?`, BOOKS[k]))[0] || {};
+    const best = (await q<any>(`SELECT strategy, SUM(pnl) AS pnl, SUM(cost) AS staked FROM bot_positions
+      WHERE mode = 'paper' AND status != 'open' AND strategy LIKE ? GROUP BY strategy ORDER BY SUM(pnl) DESC LIMIT 1`, BOOKS[k]))[0] || null;
+    const open = (await q<{ n: number }>(`SELECT COUNT(*) AS n FROM bot_positions WHERE mode = 'paper' AND status = 'open' AND strategy LIKE ?`, BOOKS[k]))[0]?.n || 0;
+    compare[k] = {
+      closed: r.n || 0, wins: r.wins || 0, pnl: r.pnl || 0, staked: r.staked || 0, roi: r.staked ? r.pnl / r.staked : null,
+      strategies: r.strategies || 0, markets: r.markets || 0, open, since: r.since || null, best,
+    };
+  }
+
   return {
-    mode: liveOn ? 'live' : 'paper', allocation, sports, model, live, ready, risk,
-    // The paper accounts (top level, as before)
+    book, books: Object.keys(BOOKS), mode: liveOn ? 'live' : 'paper', allocation, sports,
+    model, live, ready, risk, compare,
+    // This bot's paper accounts
     ...paper, signals, byStrategy,
   };
 }

@@ -164,3 +164,15 @@ test('ready for real money only when all five checks pass', async () => {
   const d = readiness(deep, 100, good);
   assert.ok(d.maxDD > 0.2 && !d.ok.drawdown, `dd ${d.maxDD}`);
 });
+
+test('the Sports bot counts different games instead of grading math', async () => {
+  const { readiness } = await import('../src/ready.ts');
+  const rows = Array.from({ length: 120 }, (_, i) => ({ pnl: i % 4 === 0 ? -1 : 0.6, cost: 3 }));
+  const few = readiness(rows, 100, null, { kind: 'sports', games: 12 });
+  assert.equal(few.kind, 'sports');
+  assert.equal(few.ok.math, false);
+  assert.equal(few.ready, false);
+  const many = readiness(rows, 100, null, { kind: 'sports', games: 45 });
+  assert.equal(many.ok.math, true);
+  assert.equal(many.ready, true, JSON.stringify(many.ok));
+});

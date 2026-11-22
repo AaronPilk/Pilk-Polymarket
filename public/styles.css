@@ -381,3 +381,14 @@ code { font: 13px ui-monospace, "SF Mono", Menlo, monospace; background: var(--s
 .ladder tr.on td { color: var(--blue); font-weight: 600; }
 /* The header is the drag handle: it must not hand the gesture to the scroller. */
 .sheet-top { touch-action: none; }
+
+/* Bitcoin bot | Sports bot */
+.book-switch { margin: 4px 0 14px; }
+.vs { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.vs-col { min-width: 0; }
+.vs-name { font-size: 13px; color: var(--label-2); font-weight: 500; }
+.vs-big { font: 600 26px/1.15 var(--font-display); letter-spacing: -0.02em; margin-top: 2px; }
+.vs-sub { font-size: 12px; color: var(--label-2); margin-bottom: 8px; }
+.vs-line { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; padding: 5px 0; border-top: 0.5px solid var(--sep); }
+.vs-line span { color: var(--label-2); }
+.vs-line b { font-weight: 600; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

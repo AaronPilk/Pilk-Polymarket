@@ -6,7 +6,8 @@ const store = {
   state: null,     // { snapshot, lastSync, apiConfigured }
   bot: null,      // /api/bot: the bot's own ledger
   botRange: 'all', // bot chart: 1h | 1d | 1w | all
-  botGroup: 'btc', // live | btc | hoops | all
+  botBook: (() => { try { return localStorage.getItem('pm-bot-book') === 'sports' ? 'sports' : 'btc'; } catch { return 'btc'; } })(), // btc | sports: two bots, two books
+  botGroup: 'btc', // live | btc | hoops
   botGroupSet: false,
   botCurve: {},    // 'paper:1d' | 'live:all' ... -> { at, data } from /api/bot/curve
   range: 'all',
@@ -511,7 +512,9 @@ const STRATEGY_LABEL = {
 };
 const variantOf = (id) => (STRATEGY_LABEL[id] || id || '').split(' · ')[1] || '';
 const groupOf = (s) => (s?.startsWith('crypto_') ? 'btc' : s?.startsWith('hoops_') ? 'hoops' : 'other');
-const GROUP_LABEL = { live: 'Real money', btc: 'Paper · Bitcoin', hoops: 'Paper · Basketball', all: 'Paper · All' };
+const GROUP_LABEL = { live: 'Real money', btc: 'Paper · Bitcoin', hoops: 'Paper · Basketball' };
+const BOOK_LABEL = { btc: 'Bitcoin bot', sports: 'Sports bot' };
+const BOOK_GROUP = { btc: 'btc', sports: 'hoops' };
 const BOT_RANGE_LABEL = { '1h': 'Last hour', '1d': 'Last 24 hours', '1w': 'Last 7 days', all: 'Since it started' };
 const iconBadge = ([bg, fg, path]) => `<span class="badge" style="background:${bg};color:${fg}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${path}</svg></span>`;
 const signalBadge = (kind) => iconBadge(SIGNAL_ICON[kind] || SIGNAL_ICON.swing);
@@ -524,20 +527,24 @@ async function loadCurve(range, mode) {
     if (r.ok) store.botCurve[curveKey(mode, range)] = { at: Date.now(), data: await r.json() };
   } catch {}
 }
-const botGroups = (b) => [...(b?.live ? ['live'] : []), 'btc', ...(b?.sports ? ['hoops', 'all'] : [])];
+// Each bot shows only its own book: the Bitcoin bot's paper lineup (and real money once it trades),
+// or the Sports bot's paper lineup. They're never added together.
+const botGroups = (b) => (b?.book === 'sports' ? ['hoops'] : [...(b?.live ? ['live'] : []), 'btc']);
 
 // /api/bot every 5 s while the tab is open; the chart data every 30 s, or right away when a trade
 // closes so the line steps the moment it happens.
 async function refreshBot({ curve = false } = {}) {
   if (store.mode === 'preview') return;
   try {
-    const r = await fetch('/api/bot');
+    const book = store.botBook;
+    const r = await fetch(`/api/bot?book=${book}`);
     if (!r.ok) return;
     const b = await r.json();
+    if (book !== store.botBook) return; // switched bots while this was loading
     const prev = store.bot;
     const closedChanged = !!prev && (b.record?.closed !== prev.record?.closed || b.live?.record?.closed !== prev.live?.record?.closed);
     store.bot = b;
-    if (!store.botGroupSet || !botGroups(b).includes(store.botGroup)) { store.botGroup = b.live ? 'live' : 'btc'; store.botGroupSet = true; }
+    if (!store.botGroupSet || !botGroups(b).includes(store.botGroup)) { store.botGroup = b.book === 'sports' ? 'hoops' : b.live ? 'live' : 'btc'; store.botGroupSet = true; }
     const need = [['paper', store.botRange], ...(b.live ? [['live', store.botRange]] : [])];
     await Promise.all(need.map(([mode, range]) => {
       const c = store.botCurve[curveKey(mode, range)];
@@ -559,6 +566,9 @@ function renderBot() {
   }
   if (!botBuilt) {
     el.innerHTML = `
+      <div class="segmented book-switch" id="bot-book" role="tablist" aria-label="Which bot"><div class="thumb"></div>
+        <button data-book="btc" role="tab">Bitcoin bot</button><button data-book="sports" role="tab">Sports bot</button>
+      </div>
       <div class="hero"><div class="hero-label" id="bot-label"></div><div class="hero-value num" id="bot-value">–</div><div class="hero-sub" id="bot-sub"></div></div>
       <div class="chips bot-chips" id="bot-groups"></div>
       <div class="chart-wrap" id="bot-chart"></div>
@@ -577,6 +587,28 @@ function renderBot() {
 }
 
 function setupBotControls() {
+  // Bitcoin bot | Sports bot
+  const bseg = $('#bot-book'), bthumb = $('.thumb', bseg), bbtns = $$('button', bseg);
+  const bplace = () => {
+    const i = Math.max(0, bbtns.findIndex((x) => x.dataset.book === store.botBook));
+    const w = (bseg.clientWidth - 4) / bbtns.length;
+    bthumb.style.width = `${w}px`;
+    bthumb.style.transform = `translateX(${i * w}px)`;
+    bbtns.forEach((x, j) => x.setAttribute('aria-selected', String(j === i)));
+  };
+  bbtns.forEach((btn) => btn.addEventListener('click', () => {
+    if (store.botBook === btn.dataset.book) return;
+    store.botBook = btn.dataset.book;
+    try { localStorage.setItem('pm-bot-book', store.botBook); } catch {}
+    store.botGroup = BOOK_GROUP[store.botBook];
+    store.botGroupSet = false;
+    bplace();
+    botAnimate = true;
+    refreshBot({ curve: true });
+  }));
+  new ResizeObserver(bplace).observe(bseg);
+  bplace();
+
   const seg = $('#bot-range'), thumb = $('.thumb', seg), btns = $$('button', seg);
   const place = () => {
     const i = Math.max(0, btns.findIndex((x) => x.dataset.range === store.botRange));
@@ -651,7 +683,7 @@ function paintBotHero() {
     if (Math.abs(S.open) >= 0.005) parts.push(`<span>Open <b class="${tone(S.open)}">${money(S.open, { sign: true })}</b></span>`);
   }
   if (live && b.live) parts.push(`<span>Trading <b>${esc(variantOf(b.live.strategy))}</b></span>`);
-  if (!live) parts.push(`<span><b>${Object.keys(STRATEGY_LABEL).filter((id) => b.sports || groupOf(id) === 'btc').length}</b> strategies, <b>${money(b.allocation, { cents: false })}</b> each</span>`);
+  if (!live) parts.push(`<span><b>${Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === BOOK_GROUP[b.book || 'btc']).length}</b> strategies, <b>${money(b.allocation, { cents: false })}</b> each</span>`);
   $('#bot-sub').innerHTML = parts.join('');
 }
 
@@ -774,14 +806,42 @@ function modelCard(m) {
   </div>`;
 }
 
+// Head to head: both bots on the same rules. Return on money bet is the fair yardstick, since the
+// Bitcoin bot places far more (and smaller) bets than the Sports bot.
+function compareCard(c) {
+  if (!c || !c.btc || !c.sports) return '';
+  const col = (k, name) => {
+    const x = c[k];
+    return `<div class="vs-col"><div class="vs-name">${name}</div>
+      <div class="vs-big num ${x.roi == null ? '' : tone(x.roi)}">${x.roi == null ? '–' : signedPct(x.roi)}</div>
+      <div class="vs-sub">return on ${money(x.staked)} bet</div>
+      <div class="vs-line"><span>P&L</span><b class="num ${tone(x.pnl)}">${money(x.pnl, { sign: true })}</b></div>
+      <div class="vs-line"><span>Record</span><b class="num">${x.closed ? `${x.wins}–${x.closed - x.wins}` : '–'}</b></div>
+      <div class="vs-line"><span>${k === 'btc' ? 'Windows' : 'Games'}</span><b class="num">${x.markets}</b></div>
+      <div class="vs-line"><span>Best</span><b>${x.best ? esc(variantOf(x.best.strategy) || x.best.strategy) : '–'}</b></div>
+    </div>`;
+  };
+  const a = c.btc, s2 = c.sports;
+  const enough = a.closed >= 100 && s2.closed >= 100 && s2.markets >= 30;
+  const lead = a.roi != null && s2.roi != null && a.closed && s2.closed
+    ? (Math.abs(a.roi - s2.roi) < 0.01 ? 'Even so far' : `${a.roi > s2.roi ? 'Bitcoin' : 'Sports'} is ahead per dollar bet`)
+    : 'Not enough closed trades to compare yet';
+  return `<div class="card pad">
+    <div class="vs">${col('btc', 'Bitcoin bot')}${col('sports', 'Sports bot')}</div>
+    <div class="row-sub wrap" style="margin-top:10px">${esc(lead)}${enough ? '.' : '. Early: a fair read needs 100+ closed trades on each side and 30+ different games.'}</div>
+  </div>`;
+}
+
 // Ready for real money? Five checks on the strategy that would trade it. All green means it has
 // been consistent on paper; the switch is still Aaron's.
 function readyCard(r) {
   if (!r) return '';
   const need = r.need || { trades: 100, block: 30, maxDD: 0.2, edge: 0.01 };
   const rows = [
-    ['math', 'The math beats the market', r.ok.math ? `${pct(r.sharper, 1)} sharper over ${r.windows} graded windows`
-      : r.windows < 40 ? `${r.windows} of 40 windows graded` : r.sharper == null ? 'Not scored yet' : `Needs ${pct(need.edge)} sharper; it's ${signedPct(r.sharper)}`],
+    r.kind === 'sports'
+      ? ['math', 'Enough different games', `${r.games ?? 0} of ${need.games || 30} games (trades in one game count as one bet)`]
+      : ['math', 'The math beats the market', r.ok.math ? `${pct(r.sharper, 1)} sharper over ${r.windows} graded windows`
+        : r.windows < 40 ? `${r.windows} of 40 windows graded` : r.sharper == null ? 'Not scored yet' : `Needs ${pct(need.edge)} sharper; it's ${signedPct(r.sharper)}`],
     ['trades', 'Enough trades', `${r.n} of ${need.trades} closed since the fix`],
     ['profit', 'Making money', r.n ? `${money(r.pnl, { sign: true })} on ${money(r.staked)} bet` : 'No closed trades yet'],
     ['steady', 'Consistent', r.blocks ? `Last ${need.block * 3} trades in blocks of ${need.block}: ${r.blocks.map((b) => money(b, { sign: true })).join(' · ')}` : `Needs ${need.block * 3} trades to split into three blocks`],
@@ -789,7 +849,7 @@ function readyCard(r) {
   ];
   const done = rows.filter(([k]) => r.ok[k]).length;
   return `<div class="card">
-    <div class="row"><div class="row-main"><div class="row-title">${r.ready ? 'Ready for real money' : `Not yet: ${done} of 5 checks`}</div><div class="row-sub wrap">${esc(variantOf(r.strategy) || r.strategy)} on paper since the fix. When all five are green it has been consistent. The switch is still yours.</div></div><div class="row-end"><span class="pill ${r.ready ? 'won' : 'open'}">${r.ready ? 'Ready' : 'Paper'}</span></div></div>
+    <div class="row"><div class="row-main"><div class="row-title">${r.ready ? 'Ready for real money' : `Not yet: ${done} of 5 checks`}</div><div class="row-sub wrap">${esc(variantOf(r.strategy) || r.strategy)} on paper${r.kind === 'sports' ? '' : ' since the fix'}. When all five are green it has been consistent.${r.kind === 'sports' ? ' The Sports bot has no real-money engine yet; this says when it is worth building.' : ' The switch is still yours.'}</div></div><div class="row-end"><span class="pill ${r.ready ? 'won' : 'open'}">${r.ready ? 'Ready' : 'Paper'}</span></div></div>
     ${rows.map(([k, label, detail]) => `<div class="row check-row"><span class="check ${r.ok[k] ? 'ok' : ''}">${r.ok[k] ? '✓' : ''}</span><div class="row-main"><div class="row-title">${label}</div><div class="row-sub wrap">${esc(detail)}</div></div></div>`).join('')}
   </div>`;
 }
@@ -802,7 +862,7 @@ function riskCard(k) {
   const now = k.ladder.reduce((a, x) => (k.peak >= x.at ? x : a), k.ladder[0]);
   return `<div class="card pad">
     <div class="risk-now">Up to ${money(k.equity * k.bet)} a bet · ${money(Math.max(0, k.equity * k.open))} open at once</div>
-    <div class="row-sub wrap">${k.account === 'live' ? 'Real-money account' : `${esc(variantOf(store.bot?.ready?.strategy) || 'Paper account')}`} at ${money(k.equity)}, high ${money(k.peak)}. Floor ${money(k.floor)}: ${under > 0.0005 ? `it's ${pct(under, 1)} under its high, so bets run at ${pct(k.scale)} size` : 'at its high, so bets run at full size'}. Half way to the floor means half size; at the floor it stops.</div>
+    <div class="row-sub wrap">${k.account === 'live' ? 'Real-money account' : `${esc(variantOf(k.strategy) || 'Paper account')}`} at ${money(k.equity)}, high ${money(k.peak)}. Floor ${money(k.floor)}: ${under > 0.0005 ? `it's ${pct(under, 1)} under its high, so bets run at ${pct(k.scale)} size` : 'at its high, so bets run at full size'}. Half way to the floor means half size; at the floor it stops.</div>
     <table class="ladder"><thead><tr><th>Account</th><th>A bet</th><th>All open</th><th>Gives back</th></tr></thead><tbody>
       ${k.ladder.map((x) => `<tr class="${x === now ? 'on' : ''}"><td>${rung(x.at)}</td><td>${pct(x.bet, x.bet < 0.02 ? 1 : 0)}</td><td>${pct(x.open)}</td><td>${pct(x.dd)}</td></tr>`).join('')}
     </tbody></table>
@@ -856,7 +916,8 @@ function botRest(b) {
   const losses = (b.record?.closed || 0) - (b.record?.wins || 0);
   // Each paper strategy runs its own account; the sparkline is its P&L over the chart's range.
   const strat = store.botCurve[curveKey('paper')]?.data?.strat || {};
-  const ids = Object.keys(STRATEGY_LABEL).filter((id) => b.sports || groupOf(id) === 'btc');
+  const book = b.book || 'btc', group = BOOK_GROUP[book];
+  const ids = Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === group);
   const lineup = ids.map((id) => ({ strategy: id, closed: 0, wins: 0, open: 0, pnl: 0, staked: 0, ...((b.byStrategy || []).find((x) => x.strategy === id) || {}) }));
   const leader = lineup.filter((x) => x.closed).sort((x, y) => y.pnl - x.pnl)[0];
   const tiles = [
@@ -877,15 +938,20 @@ function botRest(b) {
   return `
     ${showLive ? liveSection(L) : ''}
 
+    <div class="section">
+      <div class="section-title">Head to head<small>paper, same rules</small></div>
+      ${compareCard(b.compare)}
+    </div>
+
     ${L?.on ? '' : `<div class="section">
       <div class="section-title">Ready for real money?<small>${esc(variantOf(b.ready?.strategy) || '')}</small></div>
       ${readyCard(b.ready)}
     </div>`}
 
-    <div class="section">
+    ${book === 'btc' ? `<div class="section">
       <div class="section-title">Bitcoin model check<small>math vs market</small></div>
       ${modelCard(b.model)}
-    </div>
+    </div>` : ''}
 
     <div class="section">
       <div class="section-title">Risk ladder<small>grows the account, protects the high</small></div>
@@ -895,8 +961,8 @@ function botRest(b) {
     <div class="section">
       <div class="section-title">Paper strategies<small>each its own ${money(b.allocation, { cents: false })}</small></div>
       <div class="stats" style="margin-bottom:6px">${tiles.map(statTile).join('')}</div>
-      ${stratGroup('btc', 'Bitcoin')}
-      ${b.sports ? stratGroup('hoops', 'Basketball') : ''}
+      ${stratGroup(group, book === 'btc' ? 'Bitcoin' : 'Basketball')}
+      ${book === 'sports' && !b.sports ? '<div class="card pad off-note"><b>The Sports bot is asleep.</b> SPORTS is set to off in Cloudflare.</div>' : ''}
     </div>
 
     ${showLive ? '' : `<div class="section">
@@ -913,15 +979,16 @@ function botRest(b) {
     <div class="section">
       <div class="section-title">Bot's eye<small>what it's flagging</small></div>
       ${b.signals.length ? `<div class="card">${b.signals.slice(0, 20).map(sigRow).join('')}</div>`
-        : `<div class="card empty"><h3>Nothing flagged yet</h3>It watches the bitcoin windows and flags the moments worth a look.</div>`}
+        : `<div class="card empty"><h3>Nothing flagged yet</h3>${book === 'btc' ? 'It watches the bitcoin windows and flags the moments worth a look.' : 'It watches live NBA and college games and flags the moments worth a look.'}</div>`}
     </div>
 
     <div class="section">
       <div class="section-title">The rules</div>
       <div class="card steps">
+        <div class="step"><div><b>Two bots, separate books</b>The Bitcoin bot and the Sports bot each keep their own accounts, their own learning and their own records. Nothing is ever added together; the head-to-head just compares them on the same rules.</div></div>
         <div class="step"><div><b>Never deposits</b>Only you add money. The bot has no way to.</div></div>
         <div class="step"><div><b>Its own ${money(b.allocation, { cents: false })}</b>It trades its bankroll plus what it wins. Your money and your bets are off limits, and it skips any window where you hold a position or have orders.</div></div>
-        <div class="step"><div><b>Your switch</b>Real orders only while LIVE_TRADING is on in Cloudflare. Turn it off and it stops placing orders right away; open positions ride to their result.</div></div>
+        <div class="step"><div><b>Your switch</b>Real orders only while LIVE_TRADING is on in Cloudflare, and only the Bitcoin bot has a real-money engine so far. Turn it off and it stops placing orders right away; open positions ride to their result.</div></div>
         <div class="step"><div><b>Never pays more than it saw</b>Every buy is a limit order at the price it saw, cancelled if it doesn't fill on the spot. It checks its first order with Polymarket's preview before placing anything real.</div></div>
         <div class="step"><div><b>Bets grow with the account, inside the ladder</b>Sized off what the account is worth now and how much the grading trusts the math. Small accounts can bet up to 10% at a time; by $100K it's 1.5%. Below its high, bets shrink in step toward a floor, so a bad run can't dig a deep hole. Never more than the market can fill. Your own cap per bet (BOT_MAX_BET) beats all of it.</div></div>
         <div class="step"><div><b>Checks its data first</b>It only trades on a price fresh off a live exchange stream, lined up with the official index. If its math and the market are more than 15 points apart it skips the trade, and after a losing exit it stays out of that window.</div></div>

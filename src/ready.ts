@@ -7,6 +7,8 @@
 //   profit    those trades are up overall, after fees
 //   steady    the last 90 split into three blocks of 30: at least two of the three made money
 //   drawdown  the account never fell more than 20% from its high along the way
+// The Sports bot has no graded math yet, so its first check is spread instead: trades across 30+
+// different games (several trades in one game are one bet on that game, not independent wins).
 
 export interface ReadyRow { pnl: number | null; cost: number | null }
 export interface ReadyModel { ready?: boolean; windows?: number; modelLoss?: number | null; marketLoss?: number | null }
@@ -15,8 +17,10 @@ export const READY_TRADES = 100;
 export const READY_BLOCK = 30;
 export const READY_MAX_DD = 0.2;
 export const READY_EDGE = 0.01;
+export const READY_GAMES = 30;
 
-export function readiness(rows: ReadyRow[], allocation: number, model: ReadyModel | null) {
+export function readiness(rows: ReadyRow[], allocation: number, model: ReadyModel | null, opts: { kind?: 'btc' | 'sports'; games?: number } = {}) {
+  const kind = opts.kind || 'btc';
   const n = rows.length;
   let pnl = 0, staked = 0, eq = allocation, peak = allocation, maxDD = 0;
   for (const r of rows) {
@@ -33,7 +37,7 @@ export function readiness(rows: ReadyRow[], allocation: number, model: ReadyMode
   const sharper = model?.modelLoss != null && model?.marketLoss != null && model.marketLoss > 0
     ? (model.marketLoss - model.modelLoss) / model.marketLoss : null;
   const ok = {
-    math: !!model?.ready && sharper != null && sharper >= READY_EDGE,
+    math: kind === 'sports' ? (opts.games ?? 0) >= READY_GAMES : !!model?.ready && sharper != null && sharper >= READY_EDGE,
     trades: n >= READY_TRADES,
     profit: n > 0 && pnl > 0,
     steady: !!blocks && blocks.filter((b) => b > 0).length >= 2,
@@ -43,7 +47,7 @@ export function readiness(rows: ReadyRow[], allocation: number, model: ReadyMode
   return {
     n, pnl: r2(pnl), staked: r2(staked), maxDD: Math.round(maxDD * 1000) / 1000,
     blocks: blocks?.map(r2) ?? null, sharper: sharper == null ? null : Math.round(sharper * 1000) / 1000,
-    windows: model?.windows ?? 0, ok, ready: Object.values(ok).every(Boolean),
-    need: { trades: READY_TRADES, block: READY_BLOCK, maxDD: READY_MAX_DD, edge: READY_EDGE },
+    windows: model?.windows ?? 0, kind, games: opts.games ?? null, ok, ready: Object.values(ok).every(Boolean),
+    need: { trades: READY_TRADES, block: READY_BLOCK, maxDD: READY_MAX_DD, edge: READY_EDGE, games: READY_GAMES },
   };
 }

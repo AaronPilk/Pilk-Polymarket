@@ -20,7 +20,7 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import { ESPN_PATHS, fetchScoreboard, gameLine, gameState, longSide, matchEvent } from './espn';
-import { LEAGUE, dailyStopHit, isBlowout, shareLeft, sportFair, stakeFor } from './fairvalue';
+import { LEAGUE, dailyStopHit, isBlowout, riskLimits, shareLeft, sportFair, stakeFor } from './fairvalue';
 import { addToPosition, bankroll, closePosition, loadOpen, openPosition, settlePosition, type Position } from './paper';
 
 const GATEWAY = 'https://gateway.polymarket.us';
@@ -87,10 +87,10 @@ const SETTLE_LIVE = 15_000;
 const SETTLE_BREAK = 60_000;
 const HOOPS = new Set(['nba', 'cbb']);
 const COEF = 0.095;
-// Sizing grows with each strategy's account: up to a third of it on one game ($33 at $100),
-// Kelly-sized within that, never more than Aaron's BOT_MAX_BET when set, and a stop for the day
-// after losing a third of the day's starting account. See stakeFor() / dailyStopHit().
-const GAME_SHARE = 1 / 3;
+// Sizing grows with each strategy's account, Kelly-sized inside the same risk ladder as the
+// Bitcoin bot (fairvalue.ts riskLimits): one game counts as one bet, so starter plus adds stay
+// inside the ladder's per-bet share ($10 at $100), all open games inside its open share, bets
+// shrink toward the floor under the account's high, a day stop, and BOT_MAX_BET over all of it.
 const feePer = (p: number) => COEF * p * (1 - p);
 
 interface LiveMarket {
@@ -165,17 +165,17 @@ export class LiveFeed extends DurableObject<LiveEnv> {
   private open: Position[] = [];                             // open basketball paper positions
   private openAt = 0;
 
-  // The minute cron calls this so the loop restarts if it ever stopped. Sports are off unless
-  // SPORTS=on (Aaron, Nov 22: the bot trades bitcoin only), so by default the loop stays asleep.
+  // The minute cron calls this so the loop restarts if it ever stopped. This is the Sports bot;
+  // SPORTS=off (a Cloudflare variable) puts it to sleep without touching the Bitcoin bot.
   async fetch(_req: Request): Promise<Response> {
-    if (this.env.SPORTS !== 'on') { await this.ctx.storage.deleteAlarm(); return Response.json({ ok: true, sports: 'off' }); }
+    if (this.env.SPORTS === 'off') { await this.ctx.storage.deleteAlarm(); return Response.json({ ok: true, sports: 'off' }); }
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm == null || alarm > Date.now() + MAX_SLEEP) await this.ctx.storage.setAlarm(Date.now() + 1_000);
     return Response.json({ ok: true, alarm, live: this.reportedLive });
   }
 
   async alarm(): Promise<void> {
-    if (this.env.SPORTS !== 'on') { await this.ctx.storage.deleteAlarm(); return; }
+    if (this.env.SPORTS === 'off') { await this.ctx.storage.deleteAlarm(); return; }
     const now = Date.now();
     let active = 0;
     try {
@@ -519,10 +519,11 @@ export class LiveFeed extends DurableObject<LiveEnv> {
             || (prog >= 0.75 && v.lead < -9) || (st.trailing && v.lead >= 0) || v.edge > MAX_EDGE;
           if (!blocked && v.ask >= 0.1 && v.ask <= held.avg_entry - 0.05 && v.edge >= 0.06) {
             const bank = await bankroll(db, allocation, now, st.id);
-            const room = bank.equity * GAME_SHARE - held.cost;
-            const stake = Math.min(stakeFor({ fair: v.fair, price: v.ask, equity: bank.equity, available: bank.available, maxShare: GAME_SHARE, ceiling: ceiling(this.env) }), room);
+            // One game is one bet: starter plus adds stay inside the ladder's share of the account.
+            const room = bank.equity * riskLimits(bank.peak).bet - held.cost;
+            const stake = Math.min(stakeFor({ fair: v.fair, price: v.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet, ceiling: ceiling(this.env) }), room);
             const qty = Math.floor(stake / v.ask);
-            if (qty >= 1 && !dailyStopHit(bank.equity, bank.today)) {
+            if (qty >= 1 && !dailyStopHit(bank.equity, bank.today, bank.peak)) {
               await addToPosition(db, held, { ask: v.ask, qty, coef: COEF, reason: `fair ${cents(v.fair)} vs ask ${cents(v.ask)}, ${where(v.lead)}`, now });
             }
           }
@@ -539,8 +540,8 @@ export class LiveFeed extends DurableObject<LiveEnv> {
           .sort((x, y) => y.edge - x.edge)[0];
         if (!pick) continue;
         const bank = await bankroll(db, allocation, now, st.id);
-        if (dailyStopHit(bank.equity, bank.today)) continue;
-        const stake = stakeFor({ fair: pick.fair, price: pick.ask, equity: bank.equity, available: bank.available, maxShare: GAME_SHARE, ceiling: ceiling(this.env) });
+        if (dailyStopHit(bank.equity, bank.today, bank.peak)) continue;
+        const stake = stakeFor({ fair: pick.fair, price: pick.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet, ceiling: ceiling(this.env) });
         const qty = Math.floor(stake / pick.ask);
         if (qty < 1) continue;
         const why = st.trailing

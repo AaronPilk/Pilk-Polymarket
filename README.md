@@ -63,12 +63,14 @@ curl -X POST "$URL/api/paper" -b "pm_session=..." -H 'content-type: application/
 
 Live order placement is intentionally not wired up.
 
-## The bot
+## The bots
+
+Two bots, one database, separate books: the **Bitcoin bot** (`src/crypto.ts`, strategies `crypto_*`) and the **Sports bot** (`src/live.ts`, strategies `hoops_*`). Each keeps its own paper accounts, learning, risk ladder and readiness card, and the Bot tab shows one at a time with a head-to-head comparing them on the same rules (return on money bet, record). Nothing adds the two together.
 
 - `src/crypto.ts`: the bitcoin feed and traders (Durable Object, always on). Holds Polymarket's market-data stream (signed with the read key) plus Coinbase's bitcoin ticker and Gemini's top of book open (Kraken's socket refuses Cloudflare Workers), re-checks a market within a quarter second of any update, and runs the bitcoin paper strategies with their own accounts. The bot's price is each exchange's mid shifted onto the official CF Benchmarks index by an offset it re-learns at every window start (from Polymarket's published start price), averaged. Every 30 s it checkpoints what its math and the market said; every half hour it grades the finished windows, tunes its volatility scale and learns how much of the math to trust over the market (that trust sizes every bet).
 - Data check: no entry unless the price is fresh off a live exchange stream, none when the math is more than 15 points from the market's mid (that's bad data, not an edge), and no re-entry into a window after a losing exit.
 - Real money (`LIVE_TRADING=on`): one strategy (`LIVE_STRATEGY`, default `crypto_fair_v1`) also trades the live account through `src/orders.ts`: IOC limit buys at the price it saw, fills and fees from the exchange, a preview check before its first order after each start, never a window where the account already holds something or has orders it didn't place. The Bot tab's "Ready for real money?" card shows five checks on that strategy's paper record (math beats the market, 100+ trades, profitable, two of the last three 30-trade blocks up, never 20% under its high). The switch stays yours.
-- `src/live.ts`: the live game feed and the basketball traders, off unless `SPORTS=on`.
+- `src/live.ts`: the Sports bot: the live game feed and the basketball paper traders (NBA and college), sized by the same risk ladder (one game counts as one bet). Paper only so far; `SPORTS=off` puts it to sleep.
 - `src/cryptomath.ts`, `src/fairvalue.ts`, `src/ready.ts`: the pure math (fair value, grading, sizing, the risk ladder, readiness), unit-tested in `test/`.
 - `scripts/btc_backtest.py`: grades the bitcoin math on past windows (Polymarket's official starting prices and results plus Coinbase minute prices).
 
@@ -79,9 +81,10 @@ Cloudflare variables (Settings → Variables and Secrets), all optional. `keep_v
 | `BOT_ALLOCATION` | `100` | Each account's starting money, in dollars (each paper strategy, and the live bankroll) |
 | `BOT_MAX_BET` | none | Your cap on any single bet. Bets otherwise grow with each account, inside the risk ladder |
 | `BTC_STREAM` | on | `off` turns the live streams off; the bot polls every 5 s and makes no new entries |
-| `LIVE_TRADING` | off | `on` lets the bot place real orders with the live account. It never deposits |
+| `LIVE_TRADING` | off | `on` lets the Bitcoin bot place real orders with the live account. It never deposits |
 | `LIVE_STRATEGY` | `crypto_fair_v1` | Which bitcoin strategy trades real money |
-| `SPORTS` | off | `on` brings back the game feed, the minute recorder and the basketball paper traders |
+| `SPORTS` | on | `off` puts the Sports bot to sleep (game feed, minute recorder, basketball paper traders) |
+| `SPORTS_STRATEGY` | `hoops_trailer_v1` | Which sports strategy the Sports bot's readiness card follows |
 
 The risk ladder (`riskLimits()` in `src/fairvalue.ts`). Kelly picks each bet from the edge and the learned trust, then these limits apply, sliding smoothly between rungs:
 
