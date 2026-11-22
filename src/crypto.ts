@@ -4,7 +4,8 @@
 //
 //   Live data   Three streams stay open: Polymarket's market-data stream (best bid and ask about
 //               ten times a second, signed with the dashboard's read key), Coinbase's public
-//               bitcoin ticker and Kraken's (pushed on every best bid/offer change). Every update
+//               bitcoin ticker and Gemini's top of book (pushed on every best bid/offer
+//               change; Kraken refuses Cloudflare Workers with HTTP 526). Every update
 //               re-checks that market within a quarter second, so a take-profit or a sell above
 //               fair happens on the move, not on the next poll.
 //   Price       The windows settle on the CF Benchmarks index, a blend of exchanges, not on any
@@ -67,7 +68,9 @@ const GATEWAY = 'https://gateway.polymarket.us';
 const PM_API = 'https://api.polymarket.us';
 const PM_WS_PATH = '/v1/ws/markets';
 const CB_WS = 'https://ws-feed.exchange.coinbase.com';
-const KR_WS = 'https://ws.kraken.com/v2';
+// Gemini's public market data, top of book only: a best bid or ask change per message. Gemini is
+// one of the exchanges in the CF Benchmarks index. (Kraken's socket answers Workers with 526.)
+const GM_WS = 'https://api.gemini.com/v1/marketdata/BTCUSD?top_of_book=true&trades=false&auctions=false&heartbeat=true';
 const SPOT_URL = 'https://api.exchange.coinbase.com/products/BTC-USD/ticker';
 const UA = { 'User-Agent': 'pilk-bets/1.0' };
 const TICK = 5_000;
@@ -93,7 +96,7 @@ const MAX_EDGE = 0.3;           // an "edge" bigger than this is bad data, not a
 const MAX_GAP = 0.15;           // math this far over the market's mid: our data is off (1 win in 9, Nov 22)
 const BASIS_ALPHA = 0.3;        // how fast each exchange's learned offset follows new official prices
 const BASIS_MAX = 50;           // a gap bigger than $50 is a broken feed, not an offset
-const FEEDS = ['cb', 'kr'] as const;
+const FEEDS = ['cb', 'gm'] as const;
 type Feed = typeof FEEDS[number];
 const COEF = 0.095;             // taker fee coefficient (app rate; the API program is cheaper)
 const MAX_LIVE_WINDOWS = 3;     // per strategy: one each of 5m, 15m and 1h at most
@@ -204,11 +207,12 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private spot: { price: number; ts: number; src: Src } | null = null;
   // Exchange feeds: each one's latest raw mid, raw 1-second samples (last 10 minutes), and its
   // learned offset to the official index (official − exchange, smoothed over window starts).
-  private feed: Record<Feed, { price: number; ts: number } | null> = { cb: null, kr: null };
-  private feedSec: Record<Feed, Array<[number, number]>> = { cb: [], kr: [] };
-  private basis: Record<Feed, number> = { cb: 0, kr: 0 };
-  private basisN: Record<Feed, number> = { cb: 0, kr: 0 };
-  private basisLog: Array<{ ts: number; official: number; cb: number | null; kr: number | null }> = [];
+  private feed: Record<Feed, { price: number; ts: number } | null> = { cb: null, gm: null };
+  private feedSec: Record<Feed, Array<[number, number]>> = { cb: [], gm: [] };
+  private basis: Record<Feed, number> = { cb: 0, gm: 0 };
+  private basisN: Record<Feed, number> = { cb: 0, gm: 0 };
+  private basisLog: Array<{ ts: number; official: number; cb: number | null; gm: number | null }> = [];
+  private gmBook: { bid: number | null; ask: number | null } = { bid: null, ask: null };
   private basisAt = new Set<number>();
   private spotSec: Array<[number, number]> = [];
   private spotHist: Array<[number, number]> = [];
@@ -251,10 +255,10 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   // Streams
   private pm: Conn | null = null;
   private cb: Conn | null = null;
-  private kr: Conn | null = null;
+  private gm: Conn | null = null;
   private pmRetryAt = 0; private pmFails = 0;
   private cbRetryAt = 0; private cbFails = 0;
-  private krRetryAt = 0; private krFails = 0; private krMsgs = 0;
+  private gmRetryAt = 0; private gmFails = 0; private gmMsgs = 0;
   private pmMsgs = 0; private cbMsgs = 0; private pmConnects = 0;
   // Housekeeping
   private booted = false;
@@ -268,7 +272,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   async fetch(_req: Request): Promise<Response> {
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm == null || alarm > Date.now() + 2 * MIN) await this.ctx.storage.setAlarm(Date.now() + 1_000);
-    return Response.json({ ok: true, alarm, spot: this.spot?.price ?? null, stream: !!this.pm, ticker: !!this.cb, kraken: !!this.kr, mult: this.mult, trust: this.trust, basis: this.basis });
+    return Response.json({ ok: true, alarm, spot: this.spot?.price ?? null, stream: !!this.pm, ticker: !!this.cb, gemini: !!this.gm, mult: this.mult, trust: this.trust, basis: this.basis });
   }
 
   async alarm(): Promise<void> {
@@ -324,7 +328,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         if (Number.isFinite(Number(sb[f]))) this.basis[f] = Number(sb[f]);
         if (Number.isFinite(Number(sb.n?.[f]))) this.basisN[f] = Number(sb.n[f]);
       }
-      if (Array.isArray(sb?.log)) { this.basisLog = sb.log.slice(-24); for (const r of this.basisLog) this.basisAt.add(r.ts); }
+      if (Array.isArray(sb?.log)) { this.basisLog = sb.log.filter((r: any) => r && (r.cb != null || r.gm != null)).slice(-24); for (const r of this.basisLog) this.basisAt.add(r.ts); }
     } catch (e) {
       console.log('crypto boot error', String((e as any)?.message || e));
     }
@@ -345,7 +349,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   }
 
   private async ensureStreams(now: number) {
-    if (this.env.BTC_STREAM === 'off') { this.drop('pm'); this.drop('cb'); this.drop('kr'); return; }
+    if (this.env.BTC_STREAM === 'off') { this.drop('pm'); this.drop('cb'); this.drop('gm'); return; }
     const want = this.wantSlugs(now);
     const pmOk = this.pm && now - this.pm.last < STREAM_STALE && want.every((s) => this.pm!.slugs.includes(s));
     if (!pmOk && now >= this.pmRetryAt && this.env.POLYMARKET_KEY_ID && this.env.POLYMARKET_SECRET_KEY) {
@@ -365,18 +369,18 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         console.log('ticker error', String((e as any)?.message || e));
       }
     }
-    const krOk = this.kr && now - this.kr.last < STREAM_STALE;
-    if (!krOk && now >= this.krRetryAt) {
-      try { await this.connectKr(now); this.krFails = 0; }
+    const gmOk = this.gm && now - this.gm.last < STREAM_STALE;
+    if (!gmOk && now >= this.gmRetryAt) {
+      try { await this.connectGm(now); this.gmFails = 0; }
       catch (e) {
-        this.krFails++;
-        this.krRetryAt = now + Math.min(60_000, 2_000 * 2 ** this.krFails);
-        console.log('kraken error', String((e as any)?.message || e));
+        this.gmFails++;
+        this.gmRetryAt = now + Math.min(60_000, 2_000 * 2 ** this.gmFails);
+        console.log('gemini error', String((e as any)?.message || e));
       }
     }
   }
 
-  private drop(which: 'pm' | 'cb' | 'kr') {
+  private drop(which: 'pm' | 'cb' | 'gm') {
     const c = this[which];
     this[which] = null;
     if (c) try { c.ws.close(1000, 'off'); } catch {}
@@ -447,34 +451,40 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     this.onPrice('cb', price, now);
   }
 
-  // Kraken's level-1 ticker, pushed on every best bid/offer change: the second exchange in the
-  // bot's price, and the steady one (Coinbase's ticker only speaks on trades, and goes quiet).
-  private async connectKr(now: number) {
-    const res = await fetch(KR_WS, { headers: { ...UA, Upgrade: 'websocket' }, signal: AbortSignal.timeout(8_000) });
+  // Gemini's top of book: each message moves the best bid or ask. The second exchange in the bot's
+  // price, and the steady one (Coinbase's ticker only speaks on trades, and goes quiet).
+  private async connectGm(now: number) {
+    const res = await fetch(GM_WS, { headers: { ...UA, Upgrade: 'websocket' }, signal: AbortSignal.timeout(8_000) });
     const ws = res.webSocket;
-    if (!ws) throw new Error(`kraken refused: HTTP ${res.status}`);
+    if (!ws) throw new Error(`gemini refused: HTTP ${res.status}`);
     ws.accept();
     const conn: Conn = { ws, slugs: [], at: now, last: now, n: 0 };
-    ws.addEventListener('message', (e) => this.onKr(conn, e.data));
-    const gone = () => { if (this.kr === conn) this.kr = null; };
+    this.gmBook = { bid: null, ask: null };
+    ws.addEventListener('message', (e) => this.onGm(conn, e.data));
+    const gone = () => { if (this.gm === conn) this.gm = null; };
     ws.addEventListener('close', gone);
     ws.addEventListener('error', gone);
-    ws.send(JSON.stringify({ method: 'subscribe', params: { channel: 'ticker', symbol: ['BTC/USD'], event_trigger: 'bbo' } }));
-    const old = this.kr;
-    this.kr = conn;
+    const old = this.gm;
+    this.gm = conn;
     if (old) try { old.ws.close(1000, 'reconnected'); } catch {}
   }
 
-  private onKr(conn: Conn, data: unknown) {
+  private onGm(conn: Conn, data: unknown) {
     const now = Date.now();
-    conn.last = now; conn.n++; this.krMsgs++;   // heartbeats count too: they keep the connection fresh
-    if (typeof data !== 'string') return;
+    conn.last = now; conn.n++; this.gmMsgs++;   // heartbeats count too: they keep the connection fresh
+    if (this.gm !== conn || typeof data !== 'string') return;
     let j: any;
     try { j = JSON.parse(data); } catch { return; }
-    if (j?.channel !== 'ticker' || !Array.isArray(j.data) || !j.data.length) return;
-    const bid = Number(j.data[0]?.bid), ask = Number(j.data[0]?.ask);
-    if (!(bid > 0 && ask >= bid)) return;
-    this.onPrice('kr', (bid + ask) / 2, now);
+    if (j?.type !== 'update' || !Array.isArray(j.events)) return;
+    for (const e of j.events) {
+      if (e?.type !== 'change' || !(Number(e.remaining) > 0)) continue;  // remaining 0: that level is gone
+      const px = Number(e.price);
+      if (!(px > 0)) continue;
+      if (e.side === 'bid') this.gmBook.bid = px;
+      else if (e.side === 'ask') this.gmBook.ask = px;
+    }
+    const { bid, ask } = this.gmBook;
+    if (bid != null && ask != null && ask >= bid && ask - bid < 50) this.onPrice('gm', (bid + ask) / 2, now);
   }
 
   // A new exchange price: keep its raw one-second samples (to learn its offset), rebuild the bot's
@@ -514,7 +524,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private learnBasis(start: number, official: number, now: number) {
     if (this.basisAt.has(start) || now - start > 10 * MIN) return;
     this.basisAt.add(start);
-    const row: { ts: number; official: number; cb: number | null; kr: number | null } = { ts: start, official: r2(official), cb: null, kr: null };
+    const row: { ts: number; official: number; cb: number | null; gm: number | null } = { ts: start, official: r2(official), cb: null, gm: null };
     for (const f of FEEDS) {
       const pts = this.feedSec[f].filter(([ts]) => ts >= start - MIN && ts < start);
       if (pts.length < 10) continue;
@@ -524,11 +534,12 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       this.basis[f] = learnOffset(this.basis[f], this.basisN[f], gap, BASIS_ALPHA);
       this.basisN[f]++;
     }
+    if (row.cb == null && row.gm == null) return;   // no readings of our own for that minute (just started)
     this.basisLog.push(row);
     while (this.basisLog.length > 24) this.basisLog.shift();
     for (const ts of this.basisAt) if (ts < now - 3 * 3_600_000) this.basisAt.delete(ts);
     this.pendingStmts.push(this.env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
-      .bind('btc_basis', JSON.stringify({ cb: r2(this.basis.cb), kr: r2(this.basis.kr), n: this.basisN, log: this.basisLog }), now));
+      .bind('btc_basis', JSON.stringify({ cb: r2(this.basis.cb), gm: r2(this.basis.gm), n: this.basisN, log: this.basisLog }), now));
   }
 
   private sample(now: number, price: number) {
@@ -1045,7 +1056,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private feedsNow(now: number) {
     const out: Record<string, { px: number; age: number } | null> = {};
     for (const fd of FEEDS) { const x = this.feed[fd]; out[fd] = x ? { px: r2(x.price), age: Math.round((now - x.ts) / 100) / 10 } : null; }
-    return { ...out, basis: { cb: r2(this.basis.cb), kr: r2(this.basis.kr) } };
+    return { ...out, basis: { cb: r2(this.basis.cb), gm: r2(this.basis.gm) } };
   }
 
   private allocation() { return Number(this.env.BOT_ALLOCATION || 100) || 100; }
@@ -1279,13 +1290,13 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     const pmLive = !!this.pm && now - this.pm.last < STREAM_STALE, cbLive = !!this.cb && now - this.cb.last < STREAM_STALE;
     stmts.push(set.bind('pm_stream', pmLive ? Math.round((this.pmMsgs / secs) * 10) : 0, now));  // updates per 10 s
     stmts.push(set.bind('cb_stream', cbLive ? Math.round((this.cbMsgs / secs) * 10) : 0, now));
-    const krLive = !!this.kr && now - this.kr.last < STREAM_STALE;
-    stmts.push(set.bind('kr_stream', krLive ? Math.round((this.krMsgs / secs) * 10) : 0, now));
+    const gmLive = !!this.gm && now - this.gm.last < STREAM_STALE;
+    stmts.push(set.bind('gm_stream', gmLive ? Math.round((this.gmMsgs / secs) * 10) : 0, now));
     stmts.push(set.bind('btc_trust', Math.round(this.trust * 100), now));
     stmts.push(set.bind('btc_mult', Math.round(this.mult * 100), now));
     await this.env.DB.batch(stmts);
     this.counts = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0 };
-    this.pmMsgs = 0; this.cbMsgs = 0; this.krMsgs = 0;
+    this.pmMsgs = 0; this.cbMsgs = 0; this.gmMsgs = 0;
     this.flushedAt = now;
   }
 }

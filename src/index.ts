@@ -130,7 +130,7 @@ async function state(env: Env) {
       // Live streams: updates per second over the last minute (0 = down), fresh within 3 minutes.
       stream: fresh(S.pm_stream) ? S.pm_stream.n / 10 : 0,
       ticker: fresh(S.cb_stream) ? S.cb_stream.n / 10 : 0,
-      kraken: fresh(S.kr_stream) ? S.kr_stream.n / 10 : 0,
+      gemini: fresh(S.gm_stream) ? S.gm_stream.n / 10 : 0,
       volScale: S.btc_mult ? S.btc_mult.n / 100 : 1,
       trust: S.btc_trust ? S.btc_trust.n / 100 : 0.5,
       skipped: S.gap_skips?.n ?? 0,
