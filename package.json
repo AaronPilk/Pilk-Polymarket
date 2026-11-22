@@ -1,0 +1,18 @@
+{
+  "name": "pilk-polymarket",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute pilk-polymarket --remote --file=schema.sql",
+    "db:init:local": "wrangler d1 execute pilk-polymarket --local --file=schema.sql",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261121.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.166.0"
+  }
+}

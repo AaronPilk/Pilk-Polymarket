@@ -1,0 +1,7 @@
+node_modules/
+.wrangler/
+.dev.vars
+# Your trade history never goes in git: it lives in D1.
+data/
+*.seed.sql
+.DS_Store

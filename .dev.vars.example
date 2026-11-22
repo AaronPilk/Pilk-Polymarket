@@ -1,0 +1,5 @@
+# Copy to .dev.vars for `npm run dev`. Never commit .dev.vars.
+POLYMARKET_KEY_ID=your-key-id
+POLYMARKET_SECRET_KEY=your-base64-secret
+DASH_PASSWORD=pick-a-password
+SESSION_SECRET=any-long-random-string
