@@ -46,6 +46,38 @@ const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_fair_strict', minEdge: 0.1, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15 },
   { id: 'crypto_cheap_v1', minEdge: 0.03, priceMin: 0.05, priceMax: 0.2, tpBelow: 0.2 },
 ];
+// Price ladders: "BTC above $X at <time>" for the next hourly settlement, today's 5 PM ET and
+// Friday's 5 PM ET. Once a minute, strikes near the money are priced with the same
+// averaging-aware model; a side 5c+ under fair (after fees) is bought. Volatility is bitcoin's
+// realized movement over the last two hours (at least 30 minutes of it before trading): a
+// fixed baseline overstated it on a quiet day and made every tail look cheap. One position
+// per ladder, and only strikes the model puts between 15% and 85%, since cheap crypto tails
+// are the most overpriced contracts in the research.
+const LADDER = 'crypto_ladder_v1';
+const LADDER_EVERY = 60_000;
+const LADDER_MAX_OPEN = 3;
+
+function etParts(ms: number) {
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', hour12: false, weekday: 'short',
+  }).formatToParts(new Date(ms)).map((x) => [x.type, x.value]));
+  return { y: p.year, m: p.month, d: p.day, h: Number(p.hour) % 24, wd: p.weekday };
+}
+
+// Event slugs for the ladders worth watching right now.
+export function ladderEvents(now: number): string[] {
+  const H = 3_600_000;
+  const next = new Date(Math.ceil((now + 5 * MIN) / H) * H);
+  const hr = `btc-above-hr-${next.getUTCFullYear()}-${pad(next.getUTCMonth() + 1)}-${pad(next.getUTCDate())}-${pad(next.getUTCHours())}00z`;
+  const et = etParts(now);
+  const d1 = etParts(et.h >= 17 ? now + 86_400_000 : now);
+  const wd = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(et.wd);
+  let add = (5 - wd + 7) % 7;
+  if (add === 0 && et.h >= 17) add = 7;
+  const d7 = etParts(now + add * 86_400_000);
+  return [hr, `btc-above-day-${d1.y}-${d1.m}-${d1.d}`, `btc-above-wk-${d7.y}-${d7.m}-${d7.d}`];
+}
+
 const COEF = 0.095;               // taker fee coefficient (app rate; API program is cheaper)
 const MAX_PER_WINDOW = 3;
 const MAX_LIVE_WINDOWS = 2;
@@ -77,6 +109,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private settledAt = 0;
   private open: Position[] = [];
   private openAt = 0;
+  private ladderAt = 0;
   private counts: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0 };
   private lastAt: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0 };
   private flushedAt = 0;
@@ -101,12 +134,17 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         try {
           const all: Position[] = [];
           for (const st of CRYPTO_STRATEGIES) all.push(...(await loadOpen(this.env.DB, st.id)));
+          all.push(...(await loadOpen(this.env.DB, LADDER)));
           this.open = all;
         } catch {}
         this.openAt = now;
       }
       await this.recordWindows(windows, spot, now, stmts);
       if (now - this.settledAt >= MIN) { this.settledAt = now; await this.settle(now, stmts); }
+      if (now - this.ladderAt >= LADDER_EVERY) {
+        this.ladderAt = now;
+        try { await this.ladders(now, spot); } catch (e) { console.log('ladder error', String((e as any)?.message || e)); }
+      }
       for (let i = 0; i < stmts.length; i += 100) await this.env.DB.batch(stmts.slice(i, i + 100));
       await this.flush(now);
     } catch (e) {
@@ -124,7 +162,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     } catch {}
     if (price == null) return null;
     this.spotHist.push([now, price]);
-    while (this.spotHist.length && this.spotHist[0][0] < now - 20 * MIN) this.spotHist.shift();
+    while (this.spotHist.length && this.spotHist[0][0] < now - 120 * MIN) this.spotHist.shift();
     if (price !== this.lastSpot) {
       this.lastSpot = price;
       stmts.push(this.env.DB.prepare('INSERT OR IGNORE INTO spot (asset, ts, price) VALUES (?,?,?)').bind(ASSET, now, price));
@@ -133,10 +171,11 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     return price;
   }
 
-  // Volatility per sqrt(second) from spot readings over the last 15 minutes.
-  private sigma(now: number): number | null {
+  // Volatility per sqrt(second) from spot readings over the last `minutes` (15 by default);
+  // null until at least `need` seconds of readings exist.
+  private sigma(now: number, minutes = 15, need = 120): number | null {
     let sum = 0, time = 0;
-    const h = this.spotHist.filter(([ts]) => ts >= now - 15 * MIN);
+    const h = this.spotHist.filter(([ts]) => ts >= now - minutes * MIN);
     for (let i = 1; i < h.length; i++) {
       const dt = (h[i][0] - h[i - 1][0]) / 1000;
       if (dt <= 0 || dt > 30) continue;
@@ -144,7 +183,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       sum += r * r;
       time += dt;
     }
-    return time >= 120 ? Math.sqrt(sum / time) : null;
+    return time >= need ? Math.sqrt(sum / time) : null;
   }
 
   private avgSpot(from: number, to: number): { avg: number; n: number } | null {
@@ -278,6 +317,85 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${q.left}`, now, tpBelow: st.tpBelow,
       });
       this.open.push(pos);
+    }
+  }
+
+  private async ladders(now: number, spot: number | null) {
+    const db = this.env.DB;
+    const allocation = Number(this.env.BOT_ALLOCATION || 30) || 30;
+    const mine = () => this.open.filter((p) => p.strategy === LADDER && p.status === 'open');
+
+    // Settle anything whose ladder has resolved.
+    const pending = mine();
+    if (pending.length) {
+      const qs = pending.map((p) => `slug=${encodeURIComponent(p.market_slug)}`).join('&');
+      const res = await fetch(`${GATEWAY}/v1/markets?${qs}&limit=${pending.length}&_=${now}`, { headers: UA }).catch(() => null);
+      for (const m of (res?.ok ? (((await res.json()) as any).markets || []) : []) as any[]) {
+        if (m.status !== 'MARKET_STATUS_RESOLVED') continue;
+        let prices: string[] = [];
+        try { prices = JSON.parse(m.outcomePrices || '[]'); } catch {}
+        const sides = Array.isArray(m.marketSides) ? m.marketSides : [];
+        const yes = num(prices[Math.max(0, sides.findIndex((x: any) => x.long))]);
+        if (yes !== 1 && yes !== 0) continue;
+        for (const p of pending.filter((x) => x.market_slug === m.slug)) await settlePosition(db, p, { won: (p.side === 'long') === (yes === 1), now });
+      }
+      this.open = this.open.filter((p) => p.status === 'open');
+    }
+    const sigma = this.sigma(now, 120, 30 * 60);
+    if (spot == null || sigma == null) return;
+
+    for (const ev of ladderEvents(now)) {
+      let markets: any[] = [];
+      try {
+        const r = await fetch(`${GATEWAY}/v1/events?slug=${ev}&_=${now}`, { headers: UA });
+        if (r.ok) markets = ((((await r.json()) as any).events || [])[0]?.markets || []) as any[];
+      } catch {}
+      for (const m of markets) {
+        const apt = m.assetPriceTerms || {};
+        if (apt.marketType !== 'ASSET_PRICE_MARKET_TYPE_ABOVE_BELOW' || m.status !== 'MARKET_STATUS_OPEN') continue;
+        const strike = num(apt.strike);
+        const end = Date.parse(apt.windowEnd || m.endDate);
+        if (!strike || !Number.isFinite(end)) continue;
+        const tau = (end - now) / 1000;
+        const bid = num(m.bestBidQuote), ask = num(m.bestAskQuote);
+        const fair = tau > 0 ? fairUp({ spot, strike, sigma, tau }) : null;
+        if (fair == null) continue;
+        const k = `$${Math.round(strike).toLocaleString('en-US')}`;
+        const when = String(m.question || ev).replace(/^BTC Price at /, '');
+        const held = mine().find((p) => p.market_slug === m.slug);
+        if (held) {
+          const bidSide = held.side === 'long' ? bid : ask != null ? 1 - ask : null;
+          if (bidSide == null) continue;
+          const fairSide = held.side === 'long' ? fair : 1 - fair;
+          if (held.take_profit != null && bidSide >= held.take_profit) {
+            await closePosition(db, held, { price: held.take_profit, coef: COEF, maker: true, reason: `take-profit at ${cents(held.take_profit)}`, now });
+          } else if (tau >= 120 && bidSide >= fairSide + feePer(bidSide) + 0.03) {
+            await closePosition(db, held, { price: bidSide, coef: COEF, maker: false, reason: `above fair: bid ${cents(bidSide)} vs fair ${cents(fairSide)}, BTC ${Math.round(spot).toLocaleString('en-US')}`, now });
+          }
+          continue;
+        }
+        if (tau < 300 || fair < 0.15 || fair > 0.85 || mine().length >= LADDER_MAX_OPEN) continue;
+        if (mine().some((p) => p.market_slug.startsWith(`cpc-${ev}-`))) continue; // one per ladder
+        const best = [
+          ask != null ? { side: 'long' as const, ask, fair } : null,
+          bid != null ? { side: 'short' as const, ask: +(1 - bid).toFixed(4), fair: 1 - fair } : null,
+        ].filter((o): o is { side: 'long' | 'short'; ask: number; fair: number } => !!o)
+          .map((o) => ({ ...o, edge: o.fair - o.ask - feePer(o.ask) }))
+          .filter((o) => o.ask >= 0.05 && o.ask <= 0.95 && o.edge >= 0.05 && o.edge <= 0.15)
+          .sort((a, b) => b.edge - a.edge)[0];
+        if (!best) continue;
+        const bank = await bankroll(db, allocation, now, LADDER);
+        if (bank.today <= -DAILY_STOP) continue;
+        const stake = Math.min(kellyStake(best.fair, best.ask, bank.equity), MAX_PER_WINDOW, bank.available);
+        const qty = Math.floor(stake / best.ask);
+        if (qty < 1) continue;
+        const pos = await openPosition(db, {
+          strategy: LADDER, slug: m.slug, title: `BTC at ${when}`, side: best.side,
+          sideName: `BTC ${best.side === 'long' ? 'above' : 'below'} ${k}`, ask: best.ask, qty, coef: COEF,
+          reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, BTC ${Math.round(spot).toLocaleString('en-US')}, ${Math.round(tau / 60)} min left`, now,
+        });
+        this.open.push(pos);
+      }
     }
   }
 

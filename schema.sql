@@ -195,3 +195,11 @@ CREATE TABLE IF NOT EXISTS bot_orders (
   updated_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_bot_orders_position ON bot_orders(position_id, ts);
+
+-- One-off capture of the authenticated market-data stream's first messages (format discovery).
+CREATE TABLE IF NOT EXISTS stream_debug (
+  ts INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  body TEXT,
+  PRIMARY KEY (ts, kind)
+) WITHOUT ROWID;

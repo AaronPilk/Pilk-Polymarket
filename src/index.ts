@@ -1,4 +1,5 @@
-import { aggregateOrder, isApiFill, normalize, parseFill, pm, type Fill, type PmEnv, type Row } from './polymarket';
+import { aggregateOrder, isApiFill, normalize, parseFill, pm, signedHeaders, type Fill, type PmEnv, type Row } from './polymarket';
+import { windowSlug } from './cryptomath';
 import { recordMarkets, settleMarkets } from './recorder';
 export { LiveFeed } from './live';
 export { CryptoFeed } from './crypto';
@@ -65,6 +66,7 @@ export default {
     // Keep the live feed's 5-second loop alive (it sleeps itself when no game is on).
     ctx.waitUntil(env.LIVE.get(env.LIVE.idFromName('live')).fetch('https://live/kick').catch(() => undefined));
     ctx.waitUntil(env.CRYPTO.get(env.CRYPTO.idFromName('btc')).fetch('https://crypto/kick').catch(() => undefined));
+    ctx.waitUntil(probeStream(env).catch(() => undefined));
     ctx.waitUntil((async () => {
       try { await recordMarkets(env, now, fullTick); }
       catch (e: any) { if (fullTick) await logSync(env, false, 0, `recorder: ${e?.message || e}`); }
@@ -117,6 +119,33 @@ async function state(env: Env) {
     lastSync: last ? { t: last.t, ok: !!last.ok, added: last.added, msg: last.msg } : null,
     apiConfigured: !!(env.POLYMARKET_KEY_ID && env.POLYMARKET_SECRET_KEY),
   };
+}
+
+// ---------- live price stream probe
+// Read-only: opens Polymarket's authenticated market-data stream with the dashboard's key,
+// subscribes to the open bitcoin windows for 12 seconds and saves the first messages, so the
+// real stream consumer can be built against the actual message format. Runs until it has
+// captured something, then never again.
+async function probeStream(env: Env) {
+  if (!env.POLYMARKET_KEY_ID || !env.POLYMARKET_SECRET_KEY) return;
+  const done = await env.DB.prepare('SELECT COUNT(*) AS n FROM stream_debug').first<{ n: number }>().catch(() => null);
+  if (!done || done.n >= 3) return;
+  const log = (kind: string, body: string) =>
+    env.DB.prepare('INSERT OR IGNORE INTO stream_debug (ts, kind, body) VALUES (?,?,?)').bind(Date.now(), kind, body.slice(0, 4000)).run();
+  const path = '/v1/ws/markets';
+  const res = await fetch(`https://api.polymarket.us${path}`, { headers: { ...(await signedHeaders(env, 'GET', path)), Upgrade: 'websocket' } });
+  const ws = res.webSocket;
+  if (!ws) { await log(`http_${res.status}`, await res.text().catch(() => '')); return; }
+  ws.accept();
+  const got: string[] = [];
+  ws.addEventListener('message', (e) => { if (got.length < 12) got.push(typeof e.data === 'string' ? e.data : '[binary]'); });
+  const now = Date.now();
+  const slugs = [windowSlug('btc', '5m', Math.floor(now / 300_000) * 300_000), windowSlug('btc', '15m', Math.floor(now / 900_000) * 900_000)];
+  ws.send(JSON.stringify({ subscribe: { requestId: 'probe-1', subscriptionType: 'SUBSCRIPTION_TYPE_MARKET_DATA_LITE', marketSlugs: slugs } }));
+  await new Promise((r) => setTimeout(r, 12_000));
+  try { ws.close(1000, 'probe done'); } catch {}
+  await log('connected', JSON.stringify({ slugs, messages: got.length }));
+  for (let i = 0; i < got.length; i++) await log(`msg_${String(i).padStart(2, '0')}`, got[i]);
 }
 
 // ---------- the bot's own ledger (never mixed with Aaron's trades)

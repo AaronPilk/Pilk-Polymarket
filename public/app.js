@@ -484,6 +484,7 @@ const STRATEGY_LABEL = {
   crypto_fair_v1: 'Bitcoin · price vs math',
   crypto_fair_strict: 'Bitcoin · price vs math, strict',
   crypto_cheap_v1: 'Bitcoin · cheap side, sell at 2×',
+  crypto_ladder_v1: 'Bitcoin · price ladders',
 };
 const signalBadge = (kind) => {
   const [bg, fg, path] = SIGNAL_ICON[kind] || SIGNAL_ICON.swing;
