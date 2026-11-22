@@ -20,7 +20,7 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import { ESPN_PATHS, fetchScoreboard, gameLine, gameState, longSide, matchEvent } from './espn';
-import { LEAGUE, isBlowout, kellyStake, shareLeft, sportFair } from './fairvalue';
+import { LEAGUE, dailyStopHit, isBlowout, shareLeft, sportFair, stakeFor } from './fairvalue';
 import { addToPosition, bankroll, closePosition, loadOpen, openPosition, settlePosition, type Position } from './paper';
 
 const GATEWAY = 'https://gateway.polymarket.us';
@@ -40,7 +40,9 @@ const FLUSH_EVERY = 60_000;
 const MAX_SLEEP = 5 * 60_000;
 const MIN = 60_000;
 
-interface LiveEnv { DB: D1Database; BOT_ALLOCATION?: string }
+interface LiveEnv { DB: D1Database; BOT_ALLOCATION?: string; BOT_MAX_BET?: string }
+// Aaron's own cap per bet, when he's set one (a Cloudflare variable). None by default in paper.
+const ceiling = (env: LiveEnv): number | null => { const v = Number(env.BOT_MAX_BET); return v > 0 ? v : null; };
 
 // Basketball paper traders (football waits for a better model: touchdowns come in 7s and the
 // smooth-scoring model undervalues late comebacks). A lineup of strategies (HOOPS_STRATEGIES),
@@ -85,8 +87,10 @@ const SETTLE_LIVE = 15_000;
 const SETTLE_BREAK = 60_000;
 const HOOPS = new Set(['nba', 'cbb']);
 const COEF = 0.095;
-const MAX_PER_GAME = 10;
-const DAILY_STOP = 10;
+// Sizing grows with each strategy's account: up to a third of it on one game ($33 at $100),
+// Kelly-sized within that, never more than Aaron's BOT_MAX_BET when set, and a stop for the day
+// after losing a third of the day's starting account. See stakeFor() / dailyStopHit().
+const GAME_SHARE = 1 / 3;
 const feePer = (p: number) => COEF * p * (1 - p);
 
 interface LiveMarket {
@@ -444,7 +448,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
 
   private async paperHoops(games: LiveMarket[], quotes: Map<string, Quote>, now: number) {
     const db = this.env.DB;
-    const allocation = Number(this.env.BOT_ALLOCATION || 30) || 30;
+    const allocation = Number(this.env.BOT_ALLOCATION || 100) || 100;
     if (now - this.openAt > 30_000) {
       this.open = [];
       for (const st of HOOPS_STRATEGIES) this.open.push(...(await loadOpen(db, st.id)));
@@ -512,9 +516,10 @@ export class LiveFeed extends DurableObject<LiveEnv> {
             || (prog >= 0.75 && v.lead < -9) || (st.trailing && v.lead >= 0) || v.edge > MAX_EDGE;
           if (!blocked && v.ask >= 0.1 && v.ask <= held.avg_entry - 0.05 && v.edge >= 0.06) {
             const bank = await bankroll(db, allocation, now, st.id);
-            const stake = Math.min(kellyStake(v.fair, v.ask, bank.equity), MAX_PER_GAME - held.cost, bank.available);
+            const room = bank.equity * GAME_SHARE - held.cost;
+            const stake = Math.min(stakeFor({ fair: v.fair, price: v.ask, equity: bank.equity, available: bank.available, maxShare: GAME_SHARE, ceiling: ceiling(this.env) }), room);
             const qty = Math.floor(stake / v.ask);
-            if (qty >= 1 && bank.today > -DAILY_STOP) {
+            if (qty >= 1 && !dailyStopHit(bank.equity, bank.today)) {
               await addToPosition(db, held, { ask: v.ask, qty, coef: COEF, reason: `fair ${cents(v.fair)} vs ask ${cents(v.ask)}, ${where(v.lead)}`, now });
             }
           }
@@ -531,8 +536,8 @@ export class LiveFeed extends DurableObject<LiveEnv> {
           .sort((x, y) => y.edge - x.edge)[0];
         if (!pick) continue;
         const bank = await bankroll(db, allocation, now, st.id);
-        if (bank.today <= -DAILY_STOP) continue;
-        const stake = Math.min(kellyStake(pick.fair, pick.ask, bank.equity), MAX_PER_GAME, bank.available);
+        if (dailyStopHit(bank.equity, bank.today)) continue;
+        const stake = stakeFor({ fair: pick.fair, price: pick.ask, equity: bank.equity, available: bank.available, maxShare: GAME_SHARE, ceiling: ceiling(this.env) });
         const qty = Math.floor(stake / pick.ask);
         if (qty < 1) continue;
         const why = st.trailing

@@ -120,3 +120,29 @@ export function kellyStake(fair: number, price: number, bankroll: number, fracti
   const p = price + trust * (fair - price);
   return bankroll * fraction * ((p - price) / (1 - price));
 }
+
+// Bet size that grows with the account. Kelly sizing on the current account (starting money plus
+// everything won or lost so far), so a $100 account that has grown to $10,000 bets a hundred times
+// bigger, and a losing streak shrinks the bets on its own. Capped at:
+//   maxShare  a share of the account per bet (a sixth: $16.67 at $100, $1,667 at $10K)
+//   depth     a quarter of the contracts offered at the best price, when known, so a big account
+//             never tries to buy more than the market can fill
+//   available what isn't already tied up in open positions
+//   ceiling   Aaron's own cap per bet (BOT_MAX_BET), when he's set one
+export function stakeFor(o: {
+  fair: number; price: number; equity: number; available: number;
+  fraction?: number; trust?: number; maxShare?: number; depth?: number | null; ceiling?: number | null;
+}): number {
+  const k = kellyStake(o.fair, o.price, o.equity, o.fraction ?? 0.25, o.trust ?? 0.5);
+  let cap = Math.min(o.equity * (o.maxShare ?? 1 / 6), o.available);
+  if (o.depth != null && o.depth > 0) cap = Math.min(cap, o.depth * o.price * 0.25);
+  if (o.ceiling != null && o.ceiling > 0) cap = Math.min(cap, o.ceiling);
+  return Math.max(0, Math.min(k, cap));
+}
+
+// Stop for the day after losing a third of what the account started the day with ($33 on $100),
+// so the stop scales with the account too.
+export function dailyStopHit(equity: number, today: number): boolean {
+  const startOfDay = equity - today;
+  return today <= -Math.max(1, startOfDay / 3);
+}

@@ -5,6 +5,9 @@
   "compatibility_date": "2026-11-01",
   "workers_dev": true,
   "observability": { "enabled": true },
+  // Keep variables set in the Cloudflare dashboard (BOT_ALLOCATION, BOT_MAX_BET, BTC_STREAM,
+  // LIVE_TRADING) when Git pushes deploy; without this every deploy would wipe them.
+  "keep_vars": true,
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",

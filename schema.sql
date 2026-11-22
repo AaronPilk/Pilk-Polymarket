@@ -172,7 +172,8 @@ CREATE TABLE IF NOT EXISTS bot_positions (
   pnl REAL,                                 -- proceeds - cost once closed
   result INTEGER,                           -- 1 won / 0 lost if held to settlement
   close_price REAL,                         -- price at start, for closing-line value
-  reason TEXT                               -- what opened it (signal kind)
+  reason TEXT,                              -- what opened it (signal kind)
+  meta TEXT                                 -- JSON: what the bot believed at entry (fair, edge, spot, strike, time left, sizing)
 );
 CREATE INDEX IF NOT EXISTS idx_bot_positions_status ON bot_positions(mode, status, opened_at);
 CREATE TABLE IF NOT EXISTS bot_orders (
@@ -203,3 +204,13 @@ CREATE TABLE IF NOT EXISTS stream_debug (
   body TEXT,
   PRIMARY KEY (ts, kind)
 ) WITHOUT ROWID;
+
+-- Checkpoints of the bitcoin math: every 30 s per open window, what the model and the market
+-- said. Graded after settlement to score the model against the market and tune volatility.
+CREATE TABLE IF NOT EXISTS crypto_marks (
+  slug TEXT NOT NULL, ts INTEGER NOT NULL, tau REAL NOT NULL,
+  fair REAL, bid REAL, ask REAL, spot REAL, strike REAL, sigma REAL, avg_obs REAL, src TEXT,
+  PRIMARY KEY (slug, ts)
+) WITHOUT ROWID;
+-- What the bot has learned: small JSON blobs keyed by name (btc_model: the latest grading).
+CREATE TABLE IF NOT EXISTS brain (k TEXT PRIMARY KEY, v TEXT NOT NULL, at INTEGER NOT NULL);

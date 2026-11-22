@@ -8,7 +8,7 @@
     "db:init": "wrangler d1 execute pilk-polymarket --remote --file=schema.sql",
     "db:init:local": "wrangler d1 execute pilk-polymarket --local --file=schema.sql",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs && node --experimental-strip-types --test test/*.test.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261121.1",

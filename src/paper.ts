@@ -10,7 +10,7 @@ export type Side = 'long' | 'short';
 export interface Position {
   id: string; strategy: string; market_slug: string; title: string | null; side: Side; side_name: string | null;
   status: string; opened_at: number; qty: number; avg_entry: number; cost: number; proceeds: number; fees: number;
-  adds: number; take_profit: number | null;
+  adds: number; take_profit: number | null; meta?: string | null;
 }
 
 export interface Bankroll { allocation: number; realized: number; openNet: number; equity: number; available: number; today: number; openGames: number }
@@ -68,6 +68,7 @@ export const takeProfitFor = (avgEntry: number, below = 0.15): number | null => 
 
 export async function openPosition(db: D1Database, o: {
   strategy: string; slug: string; title: string; side: Side; sideName: string; ask: number; qty: number; coef: number; reason: string; now: number; tpBelow?: number;
+  meta?: Record<string, unknown>;
 }): Promise<Position> {
   const fee = takerFee(o.qty, o.ask, o.coef);
   const cost = r2(o.qty * o.ask + fee);
@@ -75,10 +76,11 @@ export async function openPosition(db: D1Database, o: {
   const pos: Position = {
     id: id('pp', o.now), strategy: o.strategy, market_slug: o.slug, title: o.title, side: o.side, side_name: o.sideName,
     status: 'open', opened_at: o.now, qty: o.qty, avg_entry: r4(o.ask), cost, proceeds: 0, fees: fee, adds: 0, take_profit: tp,
+    meta: o.meta ? JSON.stringify(o.meta) : null,
   };
   const stmts = [
-    db.prepare(`INSERT INTO bot_positions (id, mode, strategy, market_slug, title, side, side_name, status, opened_at, qty, avg_entry, cost, proceeds, fees, adds, take_profit, reason)
-      VALUES (?, 'paper', ?,?,?,?,?, 'open', ?,?,?,?,0,?,0,?,?)`).bind(pos.id, o.strategy, o.slug, o.title, o.side, o.sideName, o.now, o.qty, pos.avg_entry, cost, fee, tp, o.reason),
+    db.prepare(`INSERT INTO bot_positions (id, mode, strategy, market_slug, title, side, side_name, status, opened_at, qty, avg_entry, cost, proceeds, fees, adds, take_profit, reason, meta)
+      VALUES (?, 'paper', ?,?,?,?,?, 'open', ?,?,?,?,0,?,0,?,?,?)`).bind(pos.id, o.strategy, o.slug, o.title, o.side, o.sideName, o.now, o.qty, pos.avg_entry, cost, fee, tp, o.reason, pos.meta ?? null),
     order(db, { pos: pos.id, now: o.now, slug: o.slug, side: o.side, action: 'buy', type: 'market', price: o.ask, qty: o.qty, fee, status: 'filled', reason: `starter: ${o.reason}` }),
   ];
   if (tp != null) stmts.push(order(db, { pos: pos.id, now: o.now, slug: o.slug, side: o.side, action: 'sell', type: 'limit', price: tp, qty: o.qty, fee: 0, status: 'resting', reason: 'take_profit' }));
