@@ -1,9 +1,11 @@
 import { aggregateOrder, isApiFill, normalize, parseFill, pm, type Fill, type PmEnv, type Row } from './polymarket';
 import { recordMarkets, settleMarkets } from './recorder';
+export { LiveFeed } from './live';
 
 interface Env extends PmEnv {
   DB: D1Database;
   ASSETS: Fetcher;
+  LIVE: DurableObjectNamespace;
   DASH_PASSWORD?: string;   // wrangler secret put DASH_PASSWORD
   SESSION_SECRET?: string;  // wrangler secret put SESSION_SECRET (any long random string)
 }
@@ -55,6 +57,8 @@ export default {
   async scheduled(evt: ScheduledController, env: Env, ctx: ExecutionContext) {
     const now = new Date(evt.scheduledTime);
     const fullTick = now.getUTCMinutes() % 15 === 0;
+    // Keep the live feed's 5-second loop alive (it sleeps itself when no game is on).
+    ctx.waitUntil(env.LIVE.get(env.LIVE.idFromName('live')).fetch('https://live/kick').catch(() => undefined));
     ctx.waitUntil((async () => {
       try { await recordMarkets(env, now, fullTick); }
       catch (e: any) { if (fullTick) await logSync(env, false, 0, `recorder: ${e?.message || e}`); }
@@ -80,11 +84,18 @@ async function listActivities(env: Env) {
 async function state(env: Env) {
   const snap = await env.DB.prepare('SELECT * FROM snapshots ORDER BY t DESC LIMIT 1').first<any>();
   const last = await env.DB.prepare('SELECT * FROM sync_log ORDER BY t DESC LIMIT 1').first<any>();
+  // Counts come from the small stats table (kept by the recorder and the live feed), so a
+  // dashboard refresh never scans the big price tables.
   const since = new Date(Date.now() - 24 * 3600_000).toISOString();
-  const rec = await env.DB.prepare('SELECT (SELECT COUNT(*) FROM markets WHERE game_start > ?) AS games, (SELECT COUNT(*) FROM prices WHERE t > ?) AS points, (SELECT COUNT(*) FROM prices) AS total, (SELECT MAX(t) FROM prices) AS last')
-    .bind(since, since).first<any>().catch(() => null);
+  const games = await env.DB.prepare('SELECT COUNT(*) AS n FROM markets WHERE game_start > ?').bind(since).first<{ n: number }>().catch(() => null);
+  const rows = await env.DB.prepare('SELECT k, n, last FROM stats').all<{ k: string; n: number; last: number | null }>().catch(() => null);
+  const S: Record<string, { n: number; last: number | null }> = {};
+  for (const r of rows?.results || []) S[r.k] = r;
+  const iso = (ms: number | null | undefined) => (ms ? new Date(ms).toISOString() : null);
+  const liveFresh = !!S.live_now?.last && Date.now() - (S.live_now.last as number) < 3 * 60_000;
   return {
-    recorder: rec ? { games: rec.games, points24h: rec.points, totalPoints: rec.total, last: rec.last } : null,
+    recorder: { games: games?.n ?? 0, totalPoints: S.prices?.n ?? 0, last: iso(S.prices?.last) },
+    live: { now: liveFresh ? S.live_now.n : 0, ticks: S.ticks?.n ?? 0, states: S.game_states?.n ?? 0, lines: S.lines?.n ?? 0, last: iso(S.ticks?.last) },
     snapshot: snap ? { t: snap.t, cash: snap.cash, positions: snap.positions, portfolio: snap.portfolio, reserved: snap.reserved } : null,
     lastSync: last ? { t: last.t, ok: !!last.ok, added: last.added, msg: last.msg } : null,
     apiConfigured: !!(env.POLYMARKET_KEY_ID && env.POLYMARKET_SECRET_KEY),

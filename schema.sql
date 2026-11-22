@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS markets (
   fee_coef REAL, status TEXT,
   last_bid REAL, last_ask REAL,     -- latest quote for the long side
   result INTEGER,                   -- 1 long side won, 0 short side won, NULL unsettled
-  settled_at TEXT, updated_at TEXT
+  settled_at TEXT, updated_at TEXT,
+  espn_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_markets_start ON markets(game_start);
 
@@ -73,4 +74,46 @@ CREATE TABLE IF NOT EXISTS prices (
   bid REAL, ask REAL,
   live INTEGER,                     -- 1 if the game had started
   PRIMARY KEY (slug, t)
+);
+
+-- Live feed: every quote change for games in progress (checked every 5 seconds).
+CREATE TABLE IF NOT EXISTS ticks (
+  slug TEXT NOT NULL,
+  ts INTEGER NOT NULL,                 -- epoch ms
+  bid REAL, ask REAL,                  -- long side, every row
+  last REAL, vol REAL,                 -- last trade price, shares traded so far (rows with per-game data only)
+  bid_depth REAL, ask_depth REAL,
+  state TEXT,                          -- MARKET_STATUS_OPEN / ...
+  PRIMARY KEY (slug, ts)
+) WITHOUT ROWID;
+
+-- Live feed: game situation from ESPN on every change, with a 30 s heartbeat for the clock.
+CREATE TABLE IF NOT EXISTS game_states (
+  espn_id TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  league TEXT, home TEXT, away TEXT,
+  home_score INTEGER, away_score INTEGER,
+  period INTEGER, clock TEXT, state TEXT,   -- state: in / post
+  possession TEXT,                          -- home / away (football)
+  down INTEGER, distance INTEGER, yard_line INTEGER,
+  last_play TEXT,
+  PRIMARY KEY (espn_id, ts)
+) WITHOUT ROWID;
+
+-- Sportsbook line in the last 10 minutes before start (closing line), American odds.
+CREATE TABLE IF NOT EXISTS lines (
+  espn_id TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  provider TEXT, home TEXT, away TEXT,
+  home_ml INTEGER, away_ml INTEGER, home_ml_open INTEGER, away_ml_open INTEGER,
+  spread REAL,                              -- home team's line
+  total REAL,
+  PRIMARY KEY (espn_id, ts)
+) WITHOUT ROWID;
+
+-- Running counters (prices, ticks, game_states, lines, live_now) so the dashboard never counts big tables.
+CREATE TABLE IF NOT EXISTS stats (
+  k TEXT PRIMARY KEY,
+  n INTEGER NOT NULL DEFAULT 0,
+  last INTEGER                              -- epoch ms of the latest write
 );

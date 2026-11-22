@@ -87,6 +87,11 @@ export async function recordMarkets(env: RecEnv, now = new Date(), fullTick = fa
       stmts.push(upsertMarket.bind(r.slug, r.league, r.event_slug, r.title, r.long_team, r.short_team, r.game_start, r.fee_coef, r.status, w.bid, w.ask, now.toISOString()));
     }
   }
+  if (written) {
+    // Running counter so the dashboard never has to count the prices table.
+    stmts.push(env.DB.prepare('INSERT INTO stats (k, n, last) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET n = n + excluded.n, last = excluded.last')
+      .bind('prices', written, now.getTime()));
+  }
   for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
   return { watched: watched.length, written };
 }
