@@ -71,6 +71,12 @@ interface HoopsStrategy {
   veto: (progress: number) => number;  // model edge (after fees) required to enter
   leaderEdge?: number;          // extra bar for a team that is ahead
   priceMin: number; priceMax: number;
+  favoriteOnly?: boolean;       // only the team that was favored at tip-off
+  comeback?: number;            // cash out once it wins back this share of the drop since tip-off...
+  comebackMin?: number;         // ...or at least this many cents over the entry (a resting sell, no fee)
+  maxAdds?: number;             // adds allowed (default 2)
+  addBefore?: number;           // adds only before this share of the game (default: any time the rules allow)
+  oneShot?: boolean;            // one position per game: no buying back in after it closes
 }
 // Each runs its own $30 paper account and can hold its own position in any game.
 const HOOPS_STRATEGIES: HoopsStrategy[] = [
@@ -78,6 +84,13 @@ const HOOPS_STRATEGIES: HoopsStrategy[] = [
   { id: 'hoops_trailer_h1', maxOpen: 2, trailing: true, maxProgress: 0.5, minDiscount: 0.05, veto: () => 0.02, priceMin: 0.2, priceMax: 0.65 },
   { id: 'hoops_trailer_deep', maxOpen: 2, trailing: true, maxProgress: 0.75, minDiscount: 0.1, veto: () => 0.04, priceMin: 0.15, priceMax: 0.6 },
   { id: 'hoops_value_v1', maxOpen: 1, trailing: false, maxProgress: 0.75, minDiscount: 0, veto: (p) => (p > 0.5 ? 0.06 : 0.04), leaderEdge: 0.08, priceMin: 0.15, priceMax: 0.85 },
+  // Aaron's comeback play, with the limits his own record points to: the team favored at tip-off,
+  // behind and 8¢+ under its tip-off price in the first three quarters; at most one add, only in
+  // the first half and never under 10¢ (his adds under 10¢: 0 of 8 historically, 4 more lost on
+  // Nov 22); cash out into the comeback (half the drop won back, at least 8¢ over the entry); and
+  // once out, done with that game (his Nov 22 Pistons re-buy after cashing out lost $38.86).
+  { id: 'hoops_comeback_v1', maxOpen: 2, trailing: true, favoriteOnly: true, maxProgress: 0.75, minDiscount: 0.08, veto: () => 0.02, priceMin: 0.15, priceMax: 0.7,
+    comeback: 0.5, comebackMin: 0.08, maxAdds: 1, addBefore: 0.5, oneShot: true },
 ];
 const MAX_EDGE = 0.12;          // a bigger "edge" is more likely our data being stale than a gift
 // Our scoreboard can lag the market, worst around the buzzer, when ESPN posts the last baskets
@@ -522,11 +535,18 @@ export class LiveFeed extends DurableObject<LiveEnv> {
             await closePosition(db, held, { price: held.take_profit, coef: COEF, maker: true, reason: `take-profit at ${cents(held.take_profit)}`, now });
             continue;
           }
+          if (st.comeback != null && held.avg_entry != null) {
+            const target = Math.min(0.99, Math.round((held.avg_entry + Math.max(st.comebackMin ?? 0, st.comeback * (v.start - held.avg_entry))) * 100) / 100);
+            if (v.bid >= target) {
+              await closePosition(db, held, { price: target, coef: COEF, maker: true, reason: `comeback cash-out at ${cents(target)} (in at ${cents(held.avg_entry)}, tip-off ${cents(v.start)}), ${where(v.lead)}`, now });
+              continue;
+            }
+          }
           if (fresh && calm && settled && minsLeft > 3 && v.bid >= v.fair + feePer(v.bid) + 0.04) {
             await closePosition(db, held, { price: v.bid, coef: COEF, maker: false, reason: `above fair: bid ${cents(v.bid)} vs fair ${cents(v.fair)}, ${where(v.lead)}`, now });
             continue;
           }
-          const blocked = !fresh || !calm || !settled || buzzer || minsLeft <= 3 || held.adds >= 2 || isBlowout(m.league, v.lead, g.period, g.clock)
+          const blocked = !fresh || !calm || !settled || buzzer || minsLeft <= 3 || held.adds >= (st.maxAdds ?? 2) || prog >= (st.addBefore ?? 1) || isBlowout(m.league, v.lead, g.period, g.clock)
             || (prog >= 0.75 && v.lead < -9) || (st.trailing && v.lead >= 0) || v.edge > MAX_EDGE;
           if (!blocked && v.ask >= 0.1 && v.ask <= held.avg_entry - 0.05 && v.edge >= 0.06) {
             const bank = await bankroll(db, allocation, now, st.id);
@@ -547,9 +567,11 @@ export class LiveFeed extends DurableObject<LiveEnv> {
         const pick = (['long', 'short'] as Side[]).map(view)
           .filter((v) => !isBlowout(m.league, v.lead, g.period, g.clock) && v.ask >= st.priceMin && v.ask <= st.priceMax && v.edge <= MAX_EDGE)
           .filter((v) => (st.trailing ? v.lead < 0 && v.ask <= v.start - st.minDiscount : true))
+          .filter((v) => !st.favoriteOnly || v.start >= 0.5)
           .filter((v) => v.edge >= Math.max(st.veto(prog), v.lead > 0 && st.leaderEdge ? st.leaderEdge : 0))
           .sort((x, y) => y.edge - x.edge)[0];
         if (!pick) continue;
+        if (st.oneShot && await db.prepare("SELECT 1 FROM bot_positions WHERE strategy = ? AND market_slug = ? AND status != 'open' LIMIT 1").bind(st.id, m.slug).first()) continue;
         const bank = await bankroll(db, allocation, now, st.id);
         if (dailyStopHit(bank.equity, bank.today, bank.peak)) continue;
         const stake = stakeFor({ fair: pick.fair, price: pick.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet, ceiling: ceiling(this.env) });
