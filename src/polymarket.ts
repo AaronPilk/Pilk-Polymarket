@@ -71,21 +71,58 @@ export interface Row {
   order?: string; color?: string; done?: string; amount?: number | null; status?: string; method?: string;
 }
 
+// Two shapes reach us: the website's rich activity feed (title, action, cost, fee...)
+// and the public API's lean v1 feed (createTime, qtyDecimal, costBasis, before/after
+// positions). Read whichever fields exist; never invent a value we can't see.
 export function normalize(a: any): Row {
   const type = String(a.type || '').replace('ACTIVITY_TYPE_', '');
-  const x = a.trade || a.positionResolution;
-  if (x) {
-    const m = x.market || {};
-    const id = a.id || (a.trade ? `trade_${x.id}` : `pos_${x.id}`);
-    return clean({
-      id, type, t: x.time, action: x.action, title: x.title, sub: x.subtitle,
-      ev: x.eventMetadata?.title, evSlug: x.eventMetadata?.slug, mkt: x.marketSlug,
-      cat: m.category, smt: m.sportsMarketType, sub2: m.eventSubcategory, gameStart: m.gameStartTime,
-      price: n(x.price), entry: n(x.entryPrice), qty: x.qty == null ? null : Number(x.qty), cost: n(x.cost),
-      basis: n(x.costBasis), fee: n(x.commission), settle: n(x.settlementPrice), payout: n(x.payout),
-      pnl: n(x.realizedPnl), order: x.orderId, color: x.color?.dark,
-    });
-  }
+  if (a.trade) return normalizeTrade(a, type);
+  if (a.positionResolution) return normalizeResolution(a, type);
+  return normalizeBalance(a, type);
+}
+
+function normalizeTrade(a: any, type: string): Row {
+  const x = a.trade, m = x.market || {}, meta = x.marketMetadata || {};
+  const qtyRaw = n(x.qtyDecimal ?? x.qty);
+  const qty = qtyRaw == null ? null : Math.abs(qtyRaw);
+  const price = n(x.price);
+  const side = String(x.side || x.action || '').toLowerCase();
+  const pnl = n(x.realizedPnl);
+  const sold = side.includes('sell') || side === 'sold' || (qtyRaw != null && qtyRaw < 0) || (!side && pnl != null && pnl !== 0);
+  const cost = n(x.cost) ?? (price != null && qty != null ? price * qty : null);
+  return clean({
+    id: a.id || `trade_${x.id}`, type, t: x.time || x.createTime || x.updateTime,
+    action: x.action || (sold ? 'sold' : 'bought'),
+    title: x.title || meta.outcome || meta.title, sub: x.subtitle || meta.title,
+    ev: x.eventMetadata?.title, evSlug: x.eventMetadata?.slug || meta.eventSlug, mkt: x.marketSlug || meta.slug,
+    cat: m.category, smt: m.sportsMarketType, sub2: m.eventSubcategory, gameStart: m.gameStartTime,
+    price, entry: n(x.entryPrice), qty, cost, basis: n(x.costBasis), fee: n(x.commission ?? x.fee),
+    pnl: sold ? pnl : null, order: x.orderId, color: x.color?.dark,
+  });
+}
+
+function normalizeResolution(a: any, type: string): Row {
+  const x = a.positionResolution, m = x.market || {};
+  const before = x.beforePosition || {}, after = x.afterPosition || {};
+  const meta = after.marketMetadata || before.marketMetadata || {};
+  const t = x.time || x.updateTime;
+  const basis = n(x.costBasis) ?? n(before.cost);
+  const pnl = n(x.realizedPnl) ?? (n(after.realized) != null && n(before.realized) != null ? (n(after.realized) as number) - (n(before.realized) as number) : null);
+  const payout = n(x.payout) ?? (pnl != null && basis != null ? pnl + basis : null);
+  const slug = x.marketSlug || meta.slug;
+  // Same id the website uses: `${slug}_${epochMs}`, so both feeds land on one row.
+  const id = a.id || (x.id ? `pos_${x.id}` : `pos_${slug}_${Date.parse(t)}`);
+  return clean({
+    id, type, t, action: x.action || (pnl == null ? undefined : pnl > 0 ? 'won' : 'lost'),
+    title: x.title || meta.outcome || meta.title, sub: x.subtitle || meta.title,
+    ev: x.eventMetadata?.title, evSlug: x.eventMetadata?.slug || meta.eventSlug, mkt: slug,
+    cat: m.category, smt: m.sportsMarketType, sub2: m.eventSubcategory, gameStart: m.gameStartTime,
+    entry: n(x.entryPrice), qty: n(x.qtyDecimal ?? x.qty ?? before.netPositionDecimal), basis,
+    settle: n(x.settlementPrice), payout, pnl, color: x.color?.dark,
+  });
+}
+
+function normalizeBalance(a: any, type: string): Row {
   const b = a.accountBalanceChange || {};
   return clean({
     id: a.id || `bal_${b.transactionId}`, type, t: b.createTime || b.updateTime, done: b.updateTime,

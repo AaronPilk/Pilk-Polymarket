@@ -75,12 +75,17 @@ async function state(env: Env) {
   };
 }
 
-async function upsert(env: Env, rows: Row[]) {
+async function upsert(env: Env, rows: Array<Row & { raw?: string }>) {
   if (!rows.length) return;
-  const placeholders = COLS.map(() => '?').join(',');
-  const updates = COLS.filter((c) => c !== 'id').map((c) => `${c}=excluded.${c}`).join(',');
-  const stmt = env.DB.prepare(`INSERT INTO activities (${COLS.join(',')}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updates}`);
-  const batch = rows.map((r: any) => stmt.bind(...COLS.map((c) => r[camel(c)] ?? null)));
+  const cols = [...COLS, 'raw'];
+  const placeholders = cols.map(() => '?').join(',');
+  // Trades and settlements never change once recorded, so the row already stored wins and
+  // a thinner feed can only fill gaps. Deposits/withdrawals do change (PENDING -> COMPLETED).
+  const fresh = new Set(['status', 'done', 'raw']);
+  const updates = cols.filter((c) => c !== 'id')
+    .map((c) => (fresh.has(c) ? `${c}=COALESCE(excluded.${c}, activities.${c})` : `${c}=COALESCE(activities.${c}, excluded.${c})`)).join(',');
+  const stmt = env.DB.prepare(`INSERT INTO activities (${cols.join(',')}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updates}`);
+  const batch = rows.map((r: any) => stmt.bind(...cols.map((c) => (c === 'raw' ? r.raw ?? null : r[camel(c)] ?? null))));
   for (let i = 0; i < batch.length; i += 50) await env.DB.batch(batch.slice(i, i + 50));
 }
 
@@ -91,13 +96,15 @@ async function sync(env: Env) {
   const known = new Set(
     (await env.DB.prepare('SELECT id FROM activities').all<{ id: string }>()).results.map((r) => r.id),
   );
-  let cursor: string | undefined, added = 0, pages = 0;
+  let cursor: string | undefined, added = 0, pages = 0, skipped = 0;
   while (pages++ < 40) {
     const q = new URLSearchParams({ limit: '100' });
     if (cursor) q.set('cursor', cursor);
     const page = await pm<any>(env, 'GET', '/v1/portfolio/activities', q);
-    const rows: Row[] = (page.activities || []).map(normalize).filter((r: Row) => r.id && r.t);
-    const fresh = rows.filter((r) => !known.has(r.id));
+    const all = (page.activities || []).map((a: any) => ({ ...normalize(a), raw: JSON.stringify(a) }));
+    const rows = all.filter((r: Row) => r.id && r.t);
+    skipped += all.length - rows.length;
+    const fresh = rows.filter((r: Row) => !known.has(r.id));
     added += fresh.length;
     await upsert(env, rows);
     if ((known.size && !fresh.length) || page.eof || !page.nextCursor) break;
@@ -108,16 +115,18 @@ async function sync(env: Env) {
     const b = await pm<any>(env, 'GET', '/v1/account/balances');
     const usd = (b.balances || []).find((x: any) => (x.currency || 'USD') === 'USD') || b.balances?.[0];
     if (usd) {
-      const cash = Number(usd.currentBalance ?? 0), pos = Number(usd.assetNotional ?? 0);
+      // buyingPower is the cash figure the app shows. currentBalance still includes
+      // pending withdrawals. bonusReservation is a promo credit not yet released.
+      const cash = Number(usd.buyingPower ?? usd.currentBalance ?? 0), pos = Number(usd.assetNotional ?? 0);
       await env.DB.prepare('INSERT OR REPLACE INTO snapshots (t, cash, positions, portfolio, reserved, raw) VALUES (?,?,?,?,?,?)')
-        .bind(new Date().toISOString(), cash, pos, cash + pos, Number(usd.balanceReservation ?? 0), JSON.stringify(b)).run();
+        .bind(new Date().toISOString(), cash, pos, cash + pos, Number(usd.bonusReservation ?? 0), JSON.stringify(b)).run();
     }
   } catch (e: any) {
     await logSync(env, false, added, `balances: ${e?.message || e}`);
     return { ok: true, added, warning: 'balances failed' };
   }
-  await logSync(env, true, added, null);
-  return { ok: true, added };
+  await logSync(env, true, added, skipped ? `${skipped} activities had no timestamp and were skipped` : null);
+  return { ok: true, added, skipped };
 }
 
 async function logSync(env: Env, ok: boolean, added: number, msg: string | null) {

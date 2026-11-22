@@ -38,7 +38,7 @@ export function buildPositions(activities) {
     let p = map.get(key);
     if (!p) {
       p = {
-        key, title: a.title, matchup: a.sub || a.ev || '', league: leagueOf(a),
+        key, title: a.title || a.mkt || 'Market', matchup: a.sub || a.ev || '', league: leagueOf(a),
         betType: betTypeOf(a), color: a.color || null, gameStart: a.gameStart || null,
         opened: a.t, closed: a.t, staked: 0, returned: 0, fees: 0, pnl: 0,
         qtyBought: 0, qtySold: 0, buys: 0, sells: 0, entryCost: 0,

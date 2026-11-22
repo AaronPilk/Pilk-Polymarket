@@ -449,12 +449,12 @@ function activityRow(a) {
       amt = '+' + money(a.amount); cls = 'pos'; break;
     case 'POSITION_RESOLUTION':
       icon = badge(a.title, a.color);
-      title = `${a.action === 'won' ? 'Won' : 'Lost'} · ${a.title === 'Combo' ? 'Parlay' : a.title}`; sub = a.sub || '';
+      title = `${a.action === 'won' ? 'Won' : 'Lost'} · ${a.title === 'Combo' ? 'Parlay' : a.title || a.mkt || 'market'}`; sub = a.sub || '';
       amt = a.action === 'won' ? '+' + money(a.payout) : money(0); cls = a.action === 'won' ? 'pos' : 'faint';
       meta = `P&L ${money(a.pnl || 0, { sign: true })}`; break;
     default:
       icon = badge(a.title, a.color);
-      title = `${a.action === 'sold' ? 'Sold' : 'Bought'} ${a.title === 'Combo' ? 'parlay' : a.title}`; sub = `${a.qty ?? 0} @ ${cents(a.price)} · ${a.sub || ''}`;
+      title = `${a.action === 'sold' ? 'Sold' : 'Bought'} ${a.title === 'Combo' ? 'parlay' : a.title || a.mkt || 'market'}`; sub = `${a.qty ?? 0} @ ${cents(a.price)} · ${a.sub || ''}`;
       amt = a.action === 'sold' ? '+' + money(a.cost) : MINUS + money(a.cost); cls = a.action === 'sold' ? 'pos' : '';
       meta = a.action === 'sold' ? `P&L ${money(a.pnl || 0, { sign: true })}` : fmtTime(a.t);
   }
