@@ -476,7 +476,15 @@ const clvText = (p) => {
   const v = Math.round((p.close_price - p.avg_entry) * 100);
   return `line ${v > 0 ? '+' : v < 0 ? MINUS : ''}${Math.abs(v)}¢`;
 };
-const STRATEGY_LABEL = { hoops_value_v1: 'Basketball · fair price', crypto_fair_v1: 'Bitcoin windows · fair price' };
+const STRATEGY_LABEL = {
+  hoops_trailer_v1: 'Basketball · your style',
+  hoops_trailer_h1: 'Basketball · your style, first half',
+  hoops_trailer_deep: 'Basketball · your style, deeper dips',
+  hoops_value_v1: 'Basketball · model value',
+  crypto_fair_v1: 'Bitcoin · price vs math',
+  crypto_fair_strict: 'Bitcoin · price vs math, strict',
+  crypto_cheap_v1: 'Bitcoin · cheap side, sell at 2×',
+};
 const signalBadge = (kind) => {
   const [bg, fg, path] = SIGNAL_ICON[kind] || SIGNAL_ICON.swing;
   return `<span class="badge" style="background:${bg};color:${fg}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${path}</svg></span>`;
@@ -510,7 +518,7 @@ function renderBot() {
     { label: 'Realized', value: money(b.realized || 0, { sign: true }), cls: tone(b.realized || 0), foot: 'after fees' },
   ];
   const posRow = (p) => {
-    const plan = [`in at ${cents(p.avg_entry)}`, p.adds ? `${p.adds} add${p.adds > 1 ? 's' : ''}` : null, p.take_profit ? `sells at ${cents(p.take_profit)}` : null].filter(Boolean).join(' · ');
+    const plan = [`in at ${cents(p.avg_entry)}`, p.adds ? `${p.adds} add${p.adds > 1 ? 's' : ''}` : null, p.take_profit ? `sells at ${cents(p.take_profit)}` : null, (STRATEGY_LABEL[p.strategy] || '').split(' · ')[1] || null].filter(Boolean).join(' · ');
     return `<div class="row with-badge">${badge(p.side_name || p.title)}<div class="row-main"><div class="row-title">${esc(p.side_name || p.side)}</div><div class="row-sub">${esc(plan)}</div></div><div class="row-end"><div class="row-amt">${cents(p.price)}</div><div class="row-meta ${p.upnl != null ? tone(p.upnl) : ''}">${p.upnl != null ? money(p.upnl, { sign: true }) : '–'}</div></div></div>`;
   };
   const histRow = (p) => {
@@ -519,18 +527,33 @@ function renderBot() {
   };
   const sigRow = (s) => `<div class="row with-badge">${signalBadge(s.kind)}<div class="row-main"><div class="row-title">${esc(SIGNAL_LABEL[s.kind] || s.kind)}</div><div class="row-sub">${esc(s.detail || s.title || s.slug)}</div></div><div class="row-end"><div class="row-amt">${s.price != null ? cents(s.price) : ''}</div><div class="row-meta">${ago(new Date(s.ts).toISOString())}</div></div></div>`;
 
+  // Paper mode runs a lineup of strategies, each with its own account; live mode has one bankroll.
+  const lineup = Object.keys(STRATEGY_LABEL).map((id) => ({ strategy: id, closed: 0, wins: 0, open: 0, pnl: 0, staked: 0, ...((b.byStrategy || []).find((x) => x.strategy === id) || {}) }));
+  const ranked = lineup.filter((x) => x.closed).sort((x, y) => y.pnl - x.pnl);
+  const leader = ranked[0];
+  const paperTiles = [
+    { label: 'Open', value: String(b.positions.length), foot: `${money(b.atRisk)} at risk` },
+    { label: 'Record', value: b.record?.closed ? `${b.record.wins}–${losses}` : '–', foot: 'closed positions' },
+    { label: 'Realized', value: money(b.realized || 0, { sign: true }), cls: tone(b.realized || 0), foot: 'after fees' },
+    { label: 'Leading', value: leader ? money(leader.pnl, { sign: true }) : '–', cls: leader ? tone(leader.pnl) : '', foot: leader ? (STRATEGY_LABEL[leader.strategy] || leader.strategy) : 'no closed trades yet' },
+  ];
   el.innerHTML = `
-    <div class="hero">
-      <div class="hero-label">Bot bankroll <span class="pill ${live ? 'won' : 'open'}" style="vertical-align:2px;margin-left:4px">${live ? 'Live' : 'Paper'}</span></div>
+    ${live ? `<div class="hero">
+      <div class="hero-label">Bot bankroll <span class="pill won" style="vertical-align:2px;margin-left:4px">Live</span></div>
       <div class="hero-value">${money(b.equity)}</div>
       <div class="hero-sub"><span><b class="${tone(pnl)}">${money(pnl, { sign: true })}</b> so far</span><span>Started with <b>${money(b.allocation, { cents: false })}</b></span></div>
     </div>
-    <div class="stats">${tiles.map(statTile).join('')}</div>
+    <div class="stats">${tiles.map(statTile).join('')}</div>` : `<div class="hero">
+      <div class="hero-label">Paper test <span class="pill open" style="vertical-align:2px;margin-left:4px">Paper</span></div>
+      <div class="hero-value ${tone(pnl)}">${money(pnl, { sign: true })}</div>
+      <div class="hero-sub"><span><b>${lineup.length}</b> strategies, <b>${money(b.allocation, { cents: false })}</b> each</span><span>No real money</span></div>
+    </div>
+    <div class="stats">${paperTiles.map(statTile).join('')}</div>`}
 
-    ${(b.byStrategy || []).length ? `<div class="section">
-      <div class="section-title">By strategy<small>paper results</small></div>
-      <div class="card">${b.byStrategy.map((x) => `<div class="row"><div class="row-main"><div class="row-title">${esc(STRATEGY_LABEL[x.strategy] || x.strategy)}</div><div class="row-sub">${x.closed ? `${x.wins}–${x.closed - x.wins} · ${x.staked ? signedPct(x.pnl / x.staked) : '–'} on ${money(x.staked)}` : 'No closed trades yet'}${x.open ? ` · ${x.open} open` : ''}</div></div><div class="row-end"><div class="row-amt ${tone(x.pnl)}">${money(x.pnl, { sign: true })}</div></div></div>`).join('')}</div>
-    </div>` : ''}
+    <div class="section">
+      <div class="section-title">By strategy<small>${live ? 'results' : 'paper accounts'}</small></div>
+      <div class="card">${lineup.map((x) => `<div class="row"><div class="row-main"><div class="row-title">${esc(STRATEGY_LABEL[x.strategy] || x.strategy)}</div><div class="row-sub">${x.closed ? `${x.wins}–${x.closed - x.wins} · ${x.staked ? signedPct(x.pnl / x.staked) : '–'} on ${money(x.staked)}` : 'No closed trades yet'}${x.open ? ` · ${x.open} open` : ''}</div></div><div class="row-end"><div class="row-amt ${tone(x.pnl)}">${money(x.pnl, { sign: true })}</div></div></div>`).join('')}</div>
+    </div>
 
     <div class="section">
       <div class="section-title">Open<small>${b.positions.length ? 'live prices, every 5 s' : ''}</small></div>

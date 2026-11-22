@@ -42,19 +42,50 @@ const MIN = 60_000;
 
 interface LiveEnv { DB: D1Database; BOT_ALLOCATION?: string }
 
-// Basketball paper trader (football waits for a better model: touchdowns come in 7s and the
-// smooth-scoring model undervalues late comebacks). Buys a team priced at least 4c (after fees)
-// under the fair-price model, sized by quarter Kelly, at most $10 per game and 2 games at once.
-// Adds only on a deeper discount, never under 10c, never after a blowout or late while down
-// more than one score. Sells when the bid climbs 4c (after fees) above fair, or at the 2x
-// take-profit on entries under 15c; otherwise holds to the final. Acts only on a fresh
-// scoreboard and a price that has held still for 20 seconds, because the market hears about a
-// basket before our feed does.
-const HOOPS_STRATEGY = 'hoops_value_v1';
+// Basketball paper traders (football waits for a better model: touchdowns come in 7s and the
+// smooth-scoring model undervalues late comebacks). A lineup of strategies (HOOPS_STRATEGIES),
+// each with its own paper account. The main two:
+//
+//   hoops_trailer_v1, his style (primary). Only a team that is behind, in the first three
+//     quarters, priced 20-65c and at least 5c under its tip-off price. The model only gets a
+//     veto: it must agree the drop went too far (fair at least 2c over the ask after fees, 3c
+//     in the third quarter). From his history: first-half trailing buys won 19 of 23; buys in
+//     the last quarter were break-even and only fast exits saved them.
+//   hoops_value_v1, model value (test, one game max). Either side when the price is 4c+ under
+//     fair after fees; a team that is ahead needs 8c+. Tests whether the market misprices leads.
+//
+// Both: add only on a deeper discount (never under 10c, never in a blowout, not late while down
+// more than one score; the trailer also only while still behind). Sell when the bid climbs 4c
+// (after fees) over fair, or at the 2x take-profit on entries under 15c; otherwise hold to the
+// final. No new positions in the last quarter. Act only on a fresh scoreboard and a price that
+// has held still for 20 seconds, because the market hears about a basket before our feed does.
+// Size: quarter Kelly on half the model's edge, at most $10 per game.
+interface HoopsStrategy {
+  id: string; maxOpen: number;
+  trailing: boolean;            // only a team that is behind
+  maxProgress: number;          // latest share of the game for a new position
+  minDiscount: number;          // at least this far under its tip-off price (trailing only)
+  veto: (progress: number) => number;  // model edge (after fees) required to enter
+  leaderEdge?: number;          // extra bar for a team that is ahead
+  priceMin: number; priceMax: number;
+}
+// Each runs its own $30 paper account and can hold its own position in any game.
+const HOOPS_STRATEGIES: HoopsStrategy[] = [
+  { id: 'hoops_trailer_v1', maxOpen: 2, trailing: true, maxProgress: 0.75, minDiscount: 0.05, veto: (p) => (p < 0.5 ? 0.02 : 0.03), priceMin: 0.2, priceMax: 0.65 },
+  { id: 'hoops_trailer_h1', maxOpen: 2, trailing: true, maxProgress: 0.5, minDiscount: 0.05, veto: () => 0.02, priceMin: 0.2, priceMax: 0.65 },
+  { id: 'hoops_trailer_deep', maxOpen: 2, trailing: true, maxProgress: 0.75, minDiscount: 0.1, veto: () => 0.04, priceMin: 0.15, priceMax: 0.6 },
+  { id: 'hoops_value_v1', maxOpen: 1, trailing: false, maxProgress: 0.75, minDiscount: 0, veto: (p) => (p > 0.5 ? 0.06 : 0.04), leaderEdge: 0.08, priceMin: 0.15, priceMax: 0.85 },
+];
+const MAX_EDGE = 0.12;          // a bigger "edge" is more likely our data being stale than a gift
+// Our scoreboard can lag the market, worst around the buzzer, when ESPN posts the last baskets
+// late. In live play the score must have held 15 s (plus the price steady for 20 s); at a
+// break (clock 0:00) a full minute, since nobody scores then; and nothing new in the last 30 s
+// of a period.
+const SETTLE_LIVE = 15_000;
+const SETTLE_BREAK = 60_000;
 const HOOPS = new Set(['nba', 'cbb']);
 const COEF = 0.095;
 const MAX_PER_GAME = 10;
-const MAX_OPEN_GAMES = 2;
 const DAILY_STOP = 10;
 const feePer = (p: number) => COEF * p * (1 - p);
 
@@ -69,6 +100,7 @@ interface Quote { bid: number | null; ask: number | null; mid: number | null }
 interface Situation {
   home: string | null; away: string | null; homeScore: number | null; awayScore: number | null;
   period: number | null; clock: string | null; state: string | null; at: number;
+  scoreSince: number;           // when the score last changed (our feed)
 }
 
 const midOf = (bid: number | null, ask: number | null): number | null =>
@@ -332,7 +364,9 @@ export class LiveFeed extends DurableObject<LiveEnv> {
         continue;
       }
 
-      this.situation.set(id, { home: s.home, away: s.away, homeScore: s.homeScore, awayScore: s.awayScore, period: s.period, clock: s.clock, state: s.state, at: now });
+      const prevSit = this.situation.get(id);
+      const scoreSince = prevSit && prevSit.homeScore === s.homeScore && prevSit.awayScore === s.awayScore ? prevSit.scoreSince : now;
+      this.situation.set(id, { home: s.home, away: s.away, homeScore: s.homeScore, awayScore: s.awayScore, period: s.period, clock: s.clock, state: s.state, at: now, scoreSince });
       for (const g of inLeague) {
         if (g.espn_id !== id || this.longHome.has(g.slug)) continue;
         const side = longSide(g, ev);
@@ -412,7 +446,8 @@ export class LiveFeed extends DurableObject<LiveEnv> {
     const db = this.env.DB;
     const allocation = Number(this.env.BOT_ALLOCATION || 30) || 30;
     if (now - this.openAt > 30_000) {
-      this.open = await loadOpen(db, HOOPS_STRATEGY);
+      this.open = [];
+      for (const st of HOOPS_STRATEGIES) this.open.push(...(await loadOpen(db, st.id)));
       this.openAt = now;
       // Positions on games we're no longer watching: settle from the market result if it's in.
       for (const p of this.open.filter((x) => !games.some((g) => g.slug === x.market_slug))) {
@@ -422,14 +457,14 @@ export class LiveFeed extends DurableObject<LiveEnv> {
       this.open = this.open.filter((x) => x.status === 'open');
     }
     for (const m of games) {
-      const held = this.open.find((p) => p.market_slug === m.slug && p.status === 'open');
       const g = m.espn_id ? this.situation.get(m.espn_id) : undefined;
       const lh = this.longHome.get(m.slug);
+      const heldHere = this.open.filter((p) => p.market_slug === m.slug && p.status === 'open');
 
-      // Final whistle: settle on the score.
-      if (held && g?.state === 'post' && g.homeScore != null && g.awayScore != null && lh != null && g.homeScore !== g.awayScore) {
+      // Final whistle: settle everything held on this game.
+      if (heldHere.length && g?.state === 'post' && g.homeScore != null && g.awayScore != null && lh != null && g.homeScore !== g.awayScore) {
         const longWon = lh ? g.homeScore > g.awayScore : g.awayScore > g.homeScore;
-        await settlePosition(db, held, { won: (held.side === 'long') === longWon, now });
+        for (const p of heldHere) await settlePosition(db, p, { won: (p.side === 'long') === longWon, now });
         continue;
       }
       if (!HOOPS.has(m.league)) continue;
@@ -445,54 +480,71 @@ export class LiveFeed extends DurableObject<LiveEnv> {
       const leadLong = lh ? g.homeScore - g.awayScore : g.awayScore - g.homeScore;
       const fairLong = sportFair({ league: m.league, lead: leadLong, left, startPrice: s0 });
       const fresh = now - g.at <= 25_000;
+      const secs = clockSeconds(g.clock);
+      const settled = now - g.scoreSince >= (secs === 0 ? SETTLE_BREAK : SETTLE_LIVE);
+      const buzzer = secs != null && secs > 0 && secs <= 30;
       const m20 = this.midAgo(m.slug, now, 20_000);
       const calm = m20 != null && Math.abs(q.mid - m20) <= 0.03;
-      const view = (s: Side) => ({
-        side: s, ask: s === 'long' ? q.ask! : +(1 - q.bid!).toFixed(4), bid: s === 'long' ? q.bid! : +(1 - q.ask!).toFixed(4),
-        fair: s === 'long' ? fairLong : 1 - fairLong, lead: s === 'long' ? leadLong : -leadLong,
-        team: (s === 'long' ? m.long_team : m.short_team) || s,
-      });
+      const view = (s: Side) => {
+        const ask = s === 'long' ? q.ask! : +(1 - q.bid!).toFixed(4);
+        const fair = s === 'long' ? fairLong : 1 - fairLong;
+        return {
+          side: s, ask, bid: s === 'long' ? q.bid! : +(1 - q.ask!).toFixed(4), fair,
+          lead: s === 'long' ? leadLong : -leadLong, start: s === 'long' ? s0 : 1 - s0,
+          team: (s === 'long' ? m.long_team : m.short_team) || s, edge: fair - ask - feePer(ask),
+        };
+      };
       const where = (lead: number) => `${lead > 0 ? `up ${lead}` : lead < 0 ? `down ${-lead}` : 'tied'}, ${m.league === 'cbb' ? 'H' : 'Q'}${g.period} ${g.clock}`;
 
-      if (held) {
-        const v = view(held.side);
-        if (held.take_profit != null && v.bid >= held.take_profit) {
-          await closePosition(db, held, { price: held.take_profit, coef: COEF, maker: true, reason: `take-profit at ${cents(held.take_profit)}`, now });
-          continue;
-        }
-        if (fresh && calm && minsLeft > 3 && v.bid >= v.fair + feePer(v.bid) + 0.04) {
-          await closePosition(db, held, { price: v.bid, coef: COEF, maker: false, reason: `above fair: bid ${cents(v.bid)} vs fair ${cents(v.fair)}, ${where(v.lead)}`, now });
-          continue;
-        }
-        const blocked = !fresh || !calm || minsLeft <= 3 || held.adds >= 2 || isBlowout(m.league, v.lead, g.period, g.clock) || (prog >= 0.75 && v.lead < -9);
-        if (!blocked && v.ask >= 0.1 && v.ask <= held.avg_entry - 0.05 && v.fair - v.ask - feePer(v.ask) >= 0.06) {
-          const bank = await bankroll(db, allocation, now);
-          const stake = Math.min(kellyStake(v.fair, v.ask, bank.equity), MAX_PER_GAME - held.cost, bank.available);
-          const qty = Math.floor(stake / v.ask);
-          if (qty >= 1 && bank.today > -DAILY_STOP) {
-            await addToPosition(db, held, { ask: v.ask, qty, coef: COEF, reason: `fair ${cents(v.fair)} vs ask ${cents(v.ask)}, ${where(v.lead)}`, now });
+      for (const st of HOOPS_STRATEGIES) {
+        const held = heldHere.find((p) => p.strategy === st.id && p.status === 'open');
+        if (held) {
+          const v = view(held.side);
+          if (held.take_profit != null && v.bid >= held.take_profit) {
+            await closePosition(db, held, { price: held.take_profit, coef: COEF, maker: true, reason: `take-profit at ${cents(held.take_profit)}`, now });
+            continue;
           }
+          if (fresh && calm && settled && minsLeft > 3 && v.bid >= v.fair + feePer(v.bid) + 0.04) {
+            await closePosition(db, held, { price: v.bid, coef: COEF, maker: false, reason: `above fair: bid ${cents(v.bid)} vs fair ${cents(v.fair)}, ${where(v.lead)}`, now });
+            continue;
+          }
+          const blocked = !fresh || !calm || !settled || buzzer || minsLeft <= 3 || held.adds >= 2 || isBlowout(m.league, v.lead, g.period, g.clock)
+            || (prog >= 0.75 && v.lead < -9) || (st.trailing && v.lead >= 0) || v.edge > MAX_EDGE;
+          if (!blocked && v.ask >= 0.1 && v.ask <= held.avg_entry - 0.05 && v.edge >= 0.06) {
+            const bank = await bankroll(db, allocation, now, st.id);
+            const stake = Math.min(kellyStake(v.fair, v.ask, bank.equity), MAX_PER_GAME - held.cost, bank.available);
+            const qty = Math.floor(stake / v.ask);
+            if (qty >= 1 && bank.today > -DAILY_STOP) {
+              await addToPosition(db, held, { ask: v.ask, qty, coef: COEF, reason: `fair ${cents(v.fair)} vs ask ${cents(v.ask)}, ${where(v.lead)}`, now });
+            }
+          }
+          continue;
         }
-        continue;
-      }
 
-      if (!fresh || !calm || prog >= 0.75 || minsLeft <= 3) continue;
-      if (this.open.filter((p) => p.status === 'open').length >= MAX_OPEN_GAMES) continue;
-      const best = (['long', 'short'] as Side[]).map(view)
-        .map((v) => ({ ...v, edge: v.fair - v.ask - feePer(v.ask) - (prog > 0.5 ? 0.02 : 0) }))
-        .filter((v) => v.ask >= 0.15 && v.ask <= 0.85 && v.edge >= 0.04 && !isBlowout(m.league, v.lead, g.period, g.clock))
-        .sort((a, b) => b.edge - a.edge)[0];
-      if (!best) continue;
-      const bank = await bankroll(db, allocation, now);
-      if (bank.today <= -DAILY_STOP) continue;
-      const stake = Math.min(kellyStake(best.fair, best.ask, bank.equity), MAX_PER_GAME, bank.available);
-      const qty = Math.floor(stake / best.ask);
-      if (qty < 1) continue;
-      const pos = await openPosition(db, {
-        strategy: HOOPS_STRATEGY, slug: m.slug, title: `${m.long_team || 'Home'} vs. ${m.short_team || 'Away'}`, side: best.side,
-        sideName: best.team, ask: best.ask, qty, coef: COEF, reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${where(best.lead)}`, now,
-      });
-      this.open.push(pos);
+        // New position: first part of the game, fresh, calm, settled data only.
+        if (!fresh || !calm || !settled || buzzer || prog >= st.maxProgress || minsLeft <= 3) continue;
+        if (this.open.filter((p) => p.strategy === st.id && p.status === 'open').length >= st.maxOpen) continue;
+        const pick = (['long', 'short'] as Side[]).map(view)
+          .filter((v) => !isBlowout(m.league, v.lead, g.period, g.clock) && v.ask >= st.priceMin && v.ask <= st.priceMax && v.edge <= MAX_EDGE)
+          .filter((v) => (st.trailing ? v.lead < 0 && v.ask <= v.start - st.minDiscount : true))
+          .filter((v) => v.edge >= Math.max(st.veto(prog), v.lead > 0 && st.leaderEdge ? st.leaderEdge : 0))
+          .sort((x, y) => y.edge - x.edge)[0];
+        if (!pick) continue;
+        const bank = await bankroll(db, allocation, now, st.id);
+        if (bank.today <= -DAILY_STOP) continue;
+        const stake = Math.min(kellyStake(pick.fair, pick.ask, bank.equity), MAX_PER_GAME, bank.available);
+        const qty = Math.floor(stake / pick.ask);
+        if (qty < 1) continue;
+        const why = st.trailing
+          ? `behind and ${cents(pick.start - pick.ask)} under tip-off; fair ${cents(pick.fair)} vs ask ${cents(pick.ask)}, ${where(pick.lead)}`
+          : `fair ${cents(pick.fair)} vs ask ${cents(pick.ask)}, ${where(pick.lead)}`;
+        const pos = await openPosition(db, {
+          strategy: st.id, slug: m.slug, title: `${m.long_team || 'Home'} vs. ${m.short_team || 'Away'}`, side: pick.side,
+          sideName: pick.team, ask: pick.ask, qty, coef: COEF, reason: why, now,
+        });
+        this.open.push(pos);
+        heldHere.push(pos);
+      }
     }
     this.open = this.open.filter((p) => p.status === 'open');
   }

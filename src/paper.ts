@@ -28,18 +28,24 @@ export function startOfDayET(now: number): number {
   return now - ((h * 60 + m) * 60 + s) * 1000 - (now % 1000);
 }
 
-export async function bankroll(db: D1Database, allocation: number, now: number): Promise<Bankroll> {
+// Each paper strategy runs its own account of `allocation` dollars, so results compare cleanly.
+export async function bankroll(db: D1Database, allocation: number, now: number, strategy?: string): Promise<Bankroll> {
   const row = await db.prepare(`SELECT
       COALESCE(SUM(CASE WHEN status != 'open' THEN pnl END), 0) AS realized,
       COALESCE(SUM(CASE WHEN status = 'open' THEN cost - proceeds END), 0) AS open_net,
-      COALESCE(SUM(CASE WHEN status != 'open' AND closed_at >= ? THEN pnl END), 0) AS today,
+      COALESCE(SUM(CASE WHEN status != 'open' AND closed_at >= ?1 THEN pnl END), 0) AS today,
       COUNT(DISTINCT CASE WHEN status = 'open' THEN market_slug END) AS open_games
-    FROM bot_positions WHERE mode = 'paper'`).bind(startOfDayET(now)).first<any>();
+    FROM bot_positions WHERE mode = 'paper' AND (?2 IS NULL OR strategy = ?2)`).bind(startOfDayET(now), strategy ?? null).first<any>();
   const realized = row?.realized || 0, openNet = row?.open_net || 0;
   return {
     allocation, realized, openNet, equity: allocation + realized, today: row?.today || 0, openGames: row?.open_games || 0,
     available: Math.max(0, allocation + realized - openNet),
   };
+}
+
+export async function loadOpenBySlug(db: D1Database, slug: string): Promise<Position[]> {
+  return (await db.prepare("SELECT * FROM bot_positions WHERE mode = 'paper' AND status = 'open' AND market_slug = ?")
+    .bind(slug).all<Position>()).results;
 }
 
 export async function loadOpen(db: D1Database, strategy: string): Promise<Position[]> {
@@ -58,14 +64,14 @@ const cancelResting = (db: D1Database, pos: string, now: number) =>
 
 // Take-profit for cheap entries: a resting sell at 2x, placed at the fill (from his history:
 // cheap buys spike and give it back within minutes). Above 15c, winners tend to keep running.
-export const takeProfitFor = (avgEntry: number): number | null => (avgEntry < 0.15 ? Math.min(0.99, r4(avgEntry * 2)) : null);
+export const takeProfitFor = (avgEntry: number, below = 0.15): number | null => (avgEntry < below ? Math.min(0.99, r4(avgEntry * 2)) : null);
 
 export async function openPosition(db: D1Database, o: {
-  strategy: string; slug: string; title: string; side: Side; sideName: string; ask: number; qty: number; coef: number; reason: string; now: number;
+  strategy: string; slug: string; title: string; side: Side; sideName: string; ask: number; qty: number; coef: number; reason: string; now: number; tpBelow?: number;
 }): Promise<Position> {
   const fee = takerFee(o.qty, o.ask, o.coef);
   const cost = r2(o.qty * o.ask + fee);
-  const tp = takeProfitFor(o.ask);
+  const tp = takeProfitFor(o.ask, o.tpBelow);
   const pos: Position = {
     id: id('pp', o.now), strategy: o.strategy, market_slug: o.slug, title: o.title, side: o.side, side_name: o.sideName,
     status: 'open', opened_at: o.now, qty: o.qty, avg_entry: r4(o.ask), cost, proceeds: 0, fees: fee, adds: 0, take_profit: tp,
@@ -80,7 +86,7 @@ export async function openPosition(db: D1Database, o: {
   return pos;
 }
 
-export async function addToPosition(db: D1Database, pos: Position, o: { ask: number; qty: number; coef: number; reason: string; now: number }) {
+export async function addToPosition(db: D1Database, pos: Position, o: { ask: number; qty: number; coef: number; reason: string; now: number; tpBelow?: number }) {
   const fee = takerFee(o.qty, o.ask, o.coef);
   const qty = pos.qty + o.qty;
   pos.avg_entry = r4((pos.avg_entry * pos.qty + o.ask * o.qty) / qty);
@@ -88,7 +94,7 @@ export async function addToPosition(db: D1Database, pos: Position, o: { ask: num
   pos.cost = r2(pos.cost + o.qty * o.ask + fee);
   pos.fees = r2(pos.fees + fee);
   pos.adds += 1;
-  pos.take_profit = takeProfitFor(pos.avg_entry);
+  pos.take_profit = takeProfitFor(pos.avg_entry, o.tpBelow);
   const stmts = [
     db.prepare('UPDATE bot_positions SET qty = ?, avg_entry = ?, cost = ?, fees = ?, adds = ?, take_profit = ? WHERE id = ?')
       .bind(pos.qty, pos.avg_entry, pos.cost, pos.fees, pos.adds, pos.take_profit, pos.id),

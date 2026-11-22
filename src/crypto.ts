@@ -16,7 +16,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { fairUp, windowEnd, windowSlug } from './cryptomath';
 import { kellyStake } from './fairvalue';
-import { bankroll, closePosition, loadOpen, openPosition, settlePosition, type Position } from './paper';
+import { bankroll, closePosition, loadOpen, loadOpenBySlug, openPosition, settlePosition, type Position } from './paper';
 
 const GATEWAY = 'https://gateway.polymarket.us';
 const SPOT_URL = 'https://api.exchange.coinbase.com/products/BTC-USD/ticker';
@@ -32,12 +32,21 @@ const SERIES = [
 const SIGNAL_COOLDOWN = 2 * MIN;
 const FLUSH_EVERY = MIN;
 
-// Paper trader: buy a side priced at least 5c (after fees) under the math, sized by quarter
-// Kelly, at most $3 per window and 2 live windows at once. Sell if the bid climbs 3c (after
-// fees) above fair, or at the 2x take-profit on entries under 15c; otherwise hold to the result.
-const STRATEGY = 'crypto_fair_v1';
+// Paper traders, each with its own $30 account: buy a side priced under the math (after fees),
+// sized by quarter Kelly, at most $3 per window and 2 live windows at once. Sell if the bid
+// climbs 3c (after fees) above fair, or at the 2x take-profit on cheap entries; otherwise hold
+// to the result.
+//   crypto_fair_v1      5c+ edge
+//   crypto_fair_strict  10c+ edge
+//   crypto_cheap_v1     his idea: a cheap side (under 20c) the math doesn't call overpriced
+//                       (3c+ edge), with a 2x sell order from the fill
+interface CryptoStrategy { id: string; minEdge: number; priceMin: number; priceMax: number; tpBelow: number }
+const CRYPTO_STRATEGIES: CryptoStrategy[] = [
+  { id: 'crypto_fair_v1', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15 },
+  { id: 'crypto_fair_strict', minEdge: 0.1, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15 },
+  { id: 'crypto_cheap_v1', minEdge: 0.03, priceMin: 0.05, priceMax: 0.2, tpBelow: 0.2 },
+];
 const COEF = 0.095;               // taker fee coefficient (app rate; API program is cheaper)
-const MIN_EDGE = 0.05;
 const MAX_PER_WINDOW = 3;
 const MAX_LIVE_WINDOWS = 2;
 const DAILY_STOP = 10;
@@ -88,7 +97,14 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         const start = Math.floor(now / len) * len;
         return { slug: windowSlug(ASSET, s.key, start), series: s.key, start, end: start + len, lookback: s.lookback };
       });
-      if (now - this.openAt > 30_000) { this.open = await loadOpen(this.env.DB, STRATEGY).catch(() => this.open); this.openAt = now; }
+      if (now - this.openAt > 30_000) {
+        try {
+          const all: Position[] = [];
+          for (const st of CRYPTO_STRATEGIES) all.push(...(await loadOpen(this.env.DB, st.id)));
+          this.open = all;
+        } catch {}
+        this.openAt = now;
+      }
       await this.recordWindows(windows, spot, now, stmts);
       if (now - this.settledAt >= MIN) { this.settledAt = now; await this.settle(now, stmts); }
       for (let i = 0; i < stmts.length; i += 100) await this.env.DB.batch(stmts.slice(i, i + 100));
@@ -236,31 +252,33 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     }
     this.open = this.open.filter((x) => x.status === 'open');
 
-    // Entry: one position per window, never in the first 30 s or the last 75 s.
+    // Entries, per strategy: one position per window each, never in the first 30 s or the last 75 s.
     if (q.fair == null || q.tau < 75 || q.tau > (w.end - w.start) / 1000 - 30) return;
-    if (this.open.some((x) => x.market_slug === w.slug)) return;
-    const live = this.open.filter((x) => (windowEnd(x.market_slug) ?? 0) > now);
-    if (live.length >= MAX_LIVE_WINDOWS) return;
-    const options = [
-      q.ask != null ? { side: 'long' as const, ask: q.ask, fair: q.fair } : null,
-      q.bid != null ? { side: 'short' as const, ask: +(1 - q.bid).toFixed(4), fair: 1 - q.fair } : null,
-    ].filter((o): o is { side: 'long' | 'short'; ask: number; fair: number } => !!o)
-      .map((o) => ({ ...o, edge: o.fair - o.ask - feePer(o.ask) }))
-      .filter((o) => o.ask >= 0.05 && o.ask <= 0.9 && o.edge >= MIN_EDGE)
-      .sort((a, b) => b.edge - a.edge);
-    const best = options[0];
-    if (!best) return;
-    const bank = await bankroll(db, Number(this.env.BOT_ALLOCATION || 30) || 30, now);
-    if (bank.today <= -DAILY_STOP) return;
-    const stake = Math.min(kellyStake(best.fair, best.ask, bank.equity), MAX_PER_WINDOW, bank.available);
-    const qty = Math.floor(stake / best.ask);
-    if (qty < 1) return;
-    const sideName = `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`;
-    const pos = await openPosition(db, {
-      strategy: STRATEGY, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side, sideName, ask: best.ask, qty, coef: COEF,
-      reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${q.left}`, now,
-    });
-    this.open.push(pos);
+    const allocation = Number(this.env.BOT_ALLOCATION || 30) || 30;
+    for (const st of CRYPTO_STRATEGIES) {
+      const mine = this.open.filter((x) => x.strategy === st.id);
+      if (mine.some((x) => x.market_slug === w.slug)) continue;
+      if (mine.filter((x) => (windowEnd(x.market_slug) ?? 0) > now).length >= MAX_LIVE_WINDOWS) continue;
+      const best = [
+        q.ask != null ? { side: 'long' as const, ask: q.ask, fair: q.fair } : null,
+        q.bid != null ? { side: 'short' as const, ask: +(1 - q.bid).toFixed(4), fair: 1 - q.fair } : null,
+      ].filter((o): o is { side: 'long' | 'short'; ask: number; fair: number } => !!o)
+        .map((o) => ({ ...o, edge: o.fair - o.ask - feePer(o.ask) }))
+        .filter((o) => o.ask >= st.priceMin && o.ask <= st.priceMax && o.edge >= st.minEdge)
+        .sort((a, b) => b.edge - a.edge)[0];
+      if (!best) continue;
+      const bank = await bankroll(db, allocation, now, st.id);
+      if (bank.today <= -DAILY_STOP) continue;
+      const stake = Math.min(kellyStake(best.fair, best.ask, bank.equity), MAX_PER_WINDOW, bank.available);
+      const qty = Math.floor(stake / best.ask);
+      if (qty < 1) continue;
+      const pos = await openPosition(db, {
+        strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side,
+        sideName: `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`, ask: best.ask, qty, coef: COEF,
+        reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${q.left}`, now, tpBelow: st.tpBelow,
+      });
+      this.open.push(pos);
+    }
   }
 
   private midAgo(slug: string, now: number, ago: number): number | null {
@@ -291,7 +309,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       const up = num(prices[longIdx]);
       if (up !== 1 && up !== 0) continue;
       stmts.push(set.bind(up, now, m.slug));
-      const held = (await loadOpen(this.env.DB, STRATEGY)).filter((p) => p.market_slug === m.slug);
+      const held = await loadOpenBySlug(this.env.DB, m.slug);
       for (const p of held) await settlePosition(this.env.DB, p, { won: (p.side === 'long') === (up === 1), now });
       if (held.length) this.open = this.open.filter((p) => p.market_slug !== m.slug);
     }
