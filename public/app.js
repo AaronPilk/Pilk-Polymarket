@@ -476,6 +476,7 @@ const clvText = (p) => {
   const v = Math.round((p.close_price - p.avg_entry) * 100);
   return `line ${v > 0 ? '+' : v < 0 ? MINUS : ''}${Math.abs(v)}¢`;
 };
+const STRATEGY_LABEL = { hoops_value_v1: 'Basketball · fair price', crypto_fair_v1: 'Bitcoin windows · fair price' };
 const signalBadge = (kind) => {
   const [bg, fg, path] = SIGNAL_ICON[kind] || SIGNAL_ICON.swing;
   return `<span class="badge" style="background:${bg};color:${fg}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${path}</svg></span>`;
@@ -525,6 +526,11 @@ function renderBot() {
       <div class="hero-sub"><span><b class="${tone(pnl)}">${money(pnl, { sign: true })}</b> so far</span><span>Started with <b>${money(b.allocation, { cents: false })}</b></span></div>
     </div>
     <div class="stats">${tiles.map(statTile).join('')}</div>
+
+    ${(b.byStrategy || []).length ? `<div class="section">
+      <div class="section-title">By strategy<small>paper results</small></div>
+      <div class="card">${b.byStrategy.map((x) => `<div class="row"><div class="row-main"><div class="row-title">${esc(STRATEGY_LABEL[x.strategy] || x.strategy)}</div><div class="row-sub">${x.closed ? `${x.wins}–${x.closed - x.wins} · ${x.staked ? signedPct(x.pnl / x.staked) : '–'} on ${money(x.staked)}` : 'No closed trades yet'}${x.open ? ` · ${x.open} open` : ''}</div></div><div class="row-end"><div class="row-amt ${tone(x.pnl)}">${money(x.pnl, { sign: true })}</div></div></div>`).join('')}</div>
+    </div>` : ''}
 
     <div class="section">
       <div class="section-title">Open<small>${b.positions.length ? 'live prices, every 5 s' : ''}</small></div>

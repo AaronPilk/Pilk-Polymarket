@@ -33,3 +33,12 @@ export function fairUp(o: { spot: number; strike: number; sigma: number; tau: nu
   if (variance <= 0) return mean >= k ? 1 : 0;
   return normCdf((mean - k) / Math.sqrt(variance));
 }
+
+// End time of a window from its slug: cpc-btc-updown-5m-2026-11-22-1810z -> 18:15Z that day.
+export function windowEnd(slug: string): number | null {
+  const m = /-updown-(\d+)([mhd])-(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})z$/.exec(slug);
+  if (!m) return null;
+  const n = Number(m[1]);
+  const len = (m[2] === 'm' ? n : m[2] === 'h' ? n * 60 : n * 1440) * 60_000;
+  return Date.UTC(+m[3], +m[4] - 1, +m[5], +m[6], +m[7]) + len;
+}

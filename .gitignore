@@ -5,3 +5,5 @@ node_modules/
 data/
 *.seed.sql
 .DS_Store
+# The bot's knowledge graph (graphify) holds trading analysis: private to this Mac, never pushed.
+brain/

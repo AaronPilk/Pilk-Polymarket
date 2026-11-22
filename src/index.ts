@@ -148,6 +148,11 @@ async function bot(env: Env) {
     positions.push({ ...p, price: exit, priceAt: t?.ts ?? null, value, upnl, orders });
   }
   const realized = totals?.realized || 0;
+  const byStrategy = await q<any>(`SELECT strategy,
+      SUM(status != 'open') AS closed, SUM(status != 'open' AND pnl > 0) AS wins, SUM(status = 'open') AS open,
+      COALESCE(SUM(CASE WHEN status != 'open' THEN pnl END), 0) AS pnl,
+      COALESCE(SUM(CASE WHEN status != 'open' THEN cost END), 0) AS staked
+    FROM bot_positions WHERE mode = ? GROUP BY strategy ORDER BY strategy`, mode);
   const signals = await q<any>(`SELECT s.slug, s.ts, s.kind, s.side, s.price, s.ref, s.detail, m.title, m.league
     FROM signals s LEFT JOIN markets m ON m.slug = s.slug ORDER BY s.ts DESC LIMIT 30`);
   return {
@@ -155,7 +160,7 @@ async function bot(env: Env) {
     equity: allocation + realized + unrealized,
     available: Math.max(0, allocation + realized - atRisk),
     record: { closed: totals?.n || 0, wins: totals?.wins || 0 },
-    positions, history, signals,
+    positions, history, signals, byStrategy,
   };
 }
 

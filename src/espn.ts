@@ -100,3 +100,23 @@ export function gameLine(ev: any) {
   };
   return line.homeMl == null && line.awayMl == null && line.spread == null ? null : line;
 }
+
+// Which side of the ESPN event the market's long team is on. Scores every team field against
+// both teams' names and slug codes; returns null when it can't tell them apart.
+export function longSide(m: { slug: string; long_team: string | null; short_team: string | null }, ev: any): 'home' | 'away' | null {
+  const tokens = m.slug.split('-');
+  const wantA = [m.long_team, tokens[2]].map(norm).filter(Boolean);
+  const wantB = [m.short_team, tokens[3]].map(norm).filter(Boolean);
+  const score = (want: string[], t: any) => {
+    const fields = [t?.abbreviation, t?.location, t?.name, t?.shortDisplayName, t?.displayName].map(norm).filter(Boolean);
+    let n = 0;
+    for (const w of want) for (const f of fields) if (f === w || (w.length >= 5 && f.includes(w)) || (f.length >= 5 && w.includes(f))) n++;
+    return n;
+  };
+  const comps = ev?.competitions?.[0]?.competitors || [];
+  if (comps.length !== 2) return null;
+  const lean = comps.map((c: any) => score(wantA, c.team) - score(wantB, c.team));
+  if (lean[0] === lean[1]) return null;
+  const c = lean[0] > lean[1] ? comps[0] : comps[1];
+  return c.homeAway === 'home' ? 'home' : c.homeAway === 'away' ? 'away' : null;
+}

@@ -19,7 +19,9 @@
 // When nothing is live it sleeps until 10 minutes before the next game (at most 5 minutes).
 
 import { DurableObject } from 'cloudflare:workers';
-import { ESPN_PATHS, fetchScoreboard, gameLine, gameState, matchEvent } from './espn';
+import { ESPN_PATHS, fetchScoreboard, gameLine, gameState, longSide, matchEvent } from './espn';
+import { LEAGUE, isBlowout, kellyStake, shareLeft, sportFair } from './fairvalue';
+import { addToPosition, bankroll, closePosition, loadOpen, openPosition, settlePosition, type Position } from './paper';
 
 const GATEWAY = 'https://gateway.polymarket.us';
 const UA = { 'User-Agent': 'pilk-bets/1.0' };
@@ -38,7 +40,23 @@ const FLUSH_EVERY = 60_000;
 const MAX_SLEEP = 5 * 60_000;
 const MIN = 60_000;
 
-interface LiveEnv { DB: D1Database }
+interface LiveEnv { DB: D1Database; BOT_ALLOCATION?: string }
+
+// Basketball paper trader (football waits for a better model: touchdowns come in 7s and the
+// smooth-scoring model undervalues late comebacks). Buys a team priced at least 4c (after fees)
+// under the fair-price model, sized by quarter Kelly, at most $10 per game and 2 games at once.
+// Adds only on a deeper discount, never under 10c, never after a blowout or late while down
+// more than one score. Sells when the bid climbs 4c (after fees) above fair, or at the 2x
+// take-profit on entries under 15c; otherwise holds to the final. Acts only on a fresh
+// scoreboard and a price that has held still for 20 seconds, because the market hears about a
+// basket before our feed does.
+const HOOPS_STRATEGY = 'hoops_value_v1';
+const HOOPS = new Set(['nba', 'cbb']);
+const COEF = 0.095;
+const MAX_PER_GAME = 10;
+const MAX_OPEN_GAMES = 2;
+const DAILY_STOP = 10;
+const feePer = (p: number) => COEF * p * (1 - p);
 
 interface LiveMarket {
   slug: string; league: string; long_team: string | null; short_team: string | null;
@@ -50,7 +68,7 @@ type Side = 'long' | 'short';
 interface Quote { bid: number | null; ask: number | null; mid: number | null }
 interface Situation {
   home: string | null; away: string | null; homeScore: number | null; awayScore: number | null;
-  period: number | null; clock: string | null; state: string | null;
+  period: number | null; clock: string | null; state: string | null; at: number;
 }
 
 const midOf = (bid: number | null, ask: number | null): number | null =>
@@ -104,9 +122,12 @@ export class LiveFeed extends DurableObject<LiveEnv> {
   private startMid = new Map<string, number>();              // slug → long-side mid at tip-off
   private startTried = new Set<string>();
   private attention = new Map<string, { until: number; reason: string }>();
-  private locked = new Set<string>();                        // slugs with an open paper trade
+  private locked = new Set<string>();                        // slugs the bot holds (paper or live)
   private signalAt = new Map<string, number>();
   private situation = new Map<string, Situation>();          // espn id → latest game state
+  private longHome = new Map<string, boolean>();             // slug → long team is the home team
+  private open: Position[] = [];                             // open basketball paper positions
+  private openAt = 0;
 
   // The minute cron calls this so the loop restarts if it ever stopped.
   async fetch(_req: Request): Promise<Response> {
@@ -134,6 +155,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
       const quotes = await this.recordQuotes(games, now, stmts);
       await this.recordGame(games, now, stmts);
       this.triage(games, quotes, now, stmts);
+      try { await this.paperHoops(games, quotes, now); } catch (e) { console.log('hoops paper error', String((e as any)?.message || e)); }
       for (let i = 0; i < stmts.length; i += 100) await this.env.DB.batch(stmts.slice(i, i + 100));
       await this.flush(now, active, false, games.filter((m) => this.inFocus(m.slug, now)).length);
     } catch (e) {
@@ -310,7 +332,12 @@ export class LiveFeed extends DurableObject<LiveEnv> {
         continue;
       }
 
-      this.situation.set(id, { home: s.home, away: s.away, homeScore: s.homeScore, awayScore: s.awayScore, period: s.period, clock: s.clock, state: s.state });
+      this.situation.set(id, { home: s.home, away: s.away, homeScore: s.homeScore, awayScore: s.awayScore, period: s.period, clock: s.clock, state: s.state, at: now });
+      for (const g of inLeague) {
+        if (g.espn_id !== id || this.longHome.has(g.slug)) continue;
+        const side = longSide(g, ev);
+        if (side) this.longHome.set(g.slug, side === 'home');
+      }
       if (s.state === 'post') {
         for (const g of inLeague) if (g.espn_id === id && !this.finishedAt.has(g.slug)) this.finishedAt.set(g.slug, now);
       }
@@ -379,6 +406,95 @@ export class LiveFeed extends DurableObject<LiveEnv> {
       // Close and late.
       if (g && lateAndClose(m.league, g)) fire('late_close', null, q.mid, null, `P${g.period} ${g.clock} ${g.away} ${g.awayScore} - ${g.home} ${g.homeScore}`);
     }
+  }
+
+  private async paperHoops(games: LiveMarket[], quotes: Map<string, Quote>, now: number) {
+    const db = this.env.DB;
+    const allocation = Number(this.env.BOT_ALLOCATION || 30) || 30;
+    if (now - this.openAt > 30_000) {
+      this.open = await loadOpen(db, HOOPS_STRATEGY);
+      this.openAt = now;
+      // Positions on games we're no longer watching: settle from the market result if it's in.
+      for (const p of this.open.filter((x) => !games.some((g) => g.slug === x.market_slug))) {
+        const r = await db.prepare('SELECT result FROM markets WHERE slug = ?').bind(p.market_slug).first<{ result: number | null }>();
+        if (r?.result === 0 || r?.result === 1) await settlePosition(db, p, { won: (p.side === 'long') === (r.result === 1), now });
+      }
+      this.open = this.open.filter((x) => x.status === 'open');
+    }
+    for (const m of games) {
+      const held = this.open.find((p) => p.market_slug === m.slug && p.status === 'open');
+      const g = m.espn_id ? this.situation.get(m.espn_id) : undefined;
+      const lh = this.longHome.get(m.slug);
+
+      // Final whistle: settle on the score.
+      if (held && g?.state === 'post' && g.homeScore != null && g.awayScore != null && lh != null && g.homeScore !== g.awayScore) {
+        const longWon = lh ? g.homeScore > g.awayScore : g.awayScore > g.homeScore;
+        await settlePosition(db, held, { won: (held.side === 'long') === longWon, now });
+        continue;
+      }
+      if (!HOOPS.has(m.league)) continue;
+      const q = quotes.get(m.slug);
+      const s0 = this.startMid.get(m.slug);
+      if (!q || q.bid == null || q.ask == null || q.mid == null || !g || g.state !== 'in' || lh == null || s0 == null) continue;
+      if (g.homeScore == null || g.awayScore == null) continue;
+      const left = shareLeft(m.league, g.period, g.clock);
+      if (left == null) continue;
+      const spec = LEAGUE[m.league];
+      const minsLeft = left * spec.periods * spec.periodMin;
+      const prog = 1 - left;
+      const leadLong = lh ? g.homeScore - g.awayScore : g.awayScore - g.homeScore;
+      const fairLong = sportFair({ league: m.league, lead: leadLong, left, startPrice: s0 });
+      const fresh = now - g.at <= 25_000;
+      const m20 = this.midAgo(m.slug, now, 20_000);
+      const calm = m20 != null && Math.abs(q.mid - m20) <= 0.03;
+      const view = (s: Side) => ({
+        side: s, ask: s === 'long' ? q.ask! : +(1 - q.bid!).toFixed(4), bid: s === 'long' ? q.bid! : +(1 - q.ask!).toFixed(4),
+        fair: s === 'long' ? fairLong : 1 - fairLong, lead: s === 'long' ? leadLong : -leadLong,
+        team: (s === 'long' ? m.long_team : m.short_team) || s,
+      });
+      const where = (lead: number) => `${lead > 0 ? `up ${lead}` : lead < 0 ? `down ${-lead}` : 'tied'}, ${m.league === 'cbb' ? 'H' : 'Q'}${g.period} ${g.clock}`;
+
+      if (held) {
+        const v = view(held.side);
+        if (held.take_profit != null && v.bid >= held.take_profit) {
+          await closePosition(db, held, { price: held.take_profit, coef: COEF, maker: true, reason: `take-profit at ${cents(held.take_profit)}`, now });
+          continue;
+        }
+        if (fresh && calm && minsLeft > 3 && v.bid >= v.fair + feePer(v.bid) + 0.04) {
+          await closePosition(db, held, { price: v.bid, coef: COEF, maker: false, reason: `above fair: bid ${cents(v.bid)} vs fair ${cents(v.fair)}, ${where(v.lead)}`, now });
+          continue;
+        }
+        const blocked = !fresh || !calm || minsLeft <= 3 || held.adds >= 2 || isBlowout(m.league, v.lead, g.period, g.clock) || (prog >= 0.75 && v.lead < -9);
+        if (!blocked && v.ask >= 0.1 && v.ask <= held.avg_entry - 0.05 && v.fair - v.ask - feePer(v.ask) >= 0.06) {
+          const bank = await bankroll(db, allocation, now);
+          const stake = Math.min(kellyStake(v.fair, v.ask, bank.equity), MAX_PER_GAME - held.cost, bank.available);
+          const qty = Math.floor(stake / v.ask);
+          if (qty >= 1 && bank.today > -DAILY_STOP) {
+            await addToPosition(db, held, { ask: v.ask, qty, coef: COEF, reason: `fair ${cents(v.fair)} vs ask ${cents(v.ask)}, ${where(v.lead)}`, now });
+          }
+        }
+        continue;
+      }
+
+      if (!fresh || !calm || prog >= 0.75 || minsLeft <= 3) continue;
+      if (this.open.filter((p) => p.status === 'open').length >= MAX_OPEN_GAMES) continue;
+      const best = (['long', 'short'] as Side[]).map(view)
+        .map((v) => ({ ...v, edge: v.fair - v.ask - feePer(v.ask) - (prog > 0.5 ? 0.02 : 0) }))
+        .filter((v) => v.ask >= 0.15 && v.ask <= 0.85 && v.edge >= 0.04 && !isBlowout(m.league, v.lead, g.period, g.clock))
+        .sort((a, b) => b.edge - a.edge)[0];
+      if (!best) continue;
+      const bank = await bankroll(db, allocation, now);
+      if (bank.today <= -DAILY_STOP) continue;
+      const stake = Math.min(kellyStake(best.fair, best.ask, bank.equity), MAX_PER_GAME, bank.available);
+      const qty = Math.floor(stake / best.ask);
+      if (qty < 1) continue;
+      const pos = await openPosition(db, {
+        strategy: HOOPS_STRATEGY, slug: m.slug, title: `${m.long_team || 'Home'} vs. ${m.short_team || 'Away'}`, side: best.side,
+        sideName: best.team, ask: best.ask, qty, coef: COEF, reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${where(best.lead)}`, now,
+      });
+      this.open.push(pos);
+    }
+    this.open = this.open.filter((p) => p.status === 'open');
   }
 
   private bump(kind: Kind, now: number) {
