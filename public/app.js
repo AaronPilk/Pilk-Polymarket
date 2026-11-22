@@ -498,6 +498,7 @@ const STRATEGY_LABEL = {
   crypto_fair_v1: 'Bitcoin · price vs math',
   crypto_fair_strict: 'Bitcoin · price vs math, strict',
   crypto_fair_max: 'Bitcoin · price vs math, bigger bets',
+  crypto_fair_maker: 'Bitcoin · price vs math, resting exits',
   crypto_hold_v1: 'Bitcoin · price vs math, hold to the end',
   crypto_double_v1: 'Bitcoin · cash out at 2× (your move)',
   crypto_cheap_v1: 'Bitcoin · cheap side, sell at 2×',
@@ -786,6 +787,7 @@ function learnRows(m) {
     <div class="learn-row"><span>Math vs market</span><b>${pct(w)} math · ${pct(1 - w)} market</b><small>${fitted ? 'Fitted from the graded windows. Every bet is sized on this blend, so the more the math earns its keep, the bigger it bets.' : `Starting at 50/50. The grading fits the real weights at 100 windows (${m?.windows || 0} so far). Every bet is sized on this blend.`}</small></div>
     <div class="learn-row"><span>Price check</span><b>${n ? `${reads('Coinbase', b.cb)} · ${reads('Gemini', b.gm)}` : 'Learning'}</b><small>${n ? `Lined up against ${n} official start prices; the bot shifts each feed onto the index.` : 'Each window start, Polymarket publishes the official price; the bot learns each exchange’s offset from it.'}</small></div>
     <div class="learn-row"><span>Data check</span><b>${Number(m?.skips || 0).toLocaleString()} skipped</b><small>Trades where the math and the market were more than 15 points apart. That big a gap is almost always our data, not a gift.</small></div>
+    <div class="learn-row"><span>Index copy</span><b>${m?.replica?.n ? `off by ${money(m.replica.mae.corr)} vs ${money(m.replica.mae.comp)}` : 'Scoring soon'}</b><small>${m?.replica?.n ? `A copy of the settlement index rebuilt from Coinbase, Gemini and Bitstamp order books, against the bot's own price: average miss on ${m.replica.n} official start prices. Shadow only; it doesn't trade.` : 'A copy of the settlement index rebuilt from exchange order books, scored against each official start price next to the bot’s own price. Shadow only.'}</small></div>
     <div class="learn-row"><span>Held off</span><b>${held ? `${Number(pz.feeds || 0).toLocaleString()} data · ${Number(pz.jumps || 0).toLocaleString()} jumps · ${Number(pz.news || 0).toLocaleString()} news` : 'Not yet'}</b><small>Windows it sat out because Coinbase and Gemini disagreed, bitcoin had just jumped, or a jobs, CPI or Fed release was due.${ev ? ` Next pause: ${esc(ev.name)}, ${clock(ev.from)} to ${new Date(ev.until).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` : ''}</small></div>
   </div>`;
 }
@@ -812,6 +814,30 @@ function modelCard(m) {
     ${calChart(m.buckets || [], m.marketBuckets || [])}
     <div class="model-foot"><span><i class="cal-key math"></i>Math</span><span><i class="cal-key mkt"></i>Market</span><span>${esc(vol)}</span></div>
     ${learnRows(m)}
+  </div>`;
+}
+
+// The Sports bot's math vs the market on finished games: one score per game at fixed points.
+function sportsModelCard(m) {
+  if (!m || !m.games) {
+    return `<div class="card pad model"><div class="model-verdict">Grading starts after tonight's games</div><div class="row-sub wrap">At four points in every game (after the first quarter, halftime, after the third, about five minutes left) the bot writes down what its math and the market said. When the game is final, both get scored.${m?.pending ? ` ${m.pending} game${m.pending > 1 ? 's' : ''} waiting on a result.` : ''}</div></div>`;
+  }
+  const e = m.edge || {};
+  const sure = e.t != null && Math.abs(e.t) >= 2;
+  let verdict = 'Not enough to compare yet', cls = '';
+  if (m.modelLoss != null && m.marketLoss != null) {
+    const d = (m.marketLoss - m.modelLoss) / m.marketLoss;
+    if (d > 0.005) { verdict = `Math ${pct(d, 1)} sharper than the market`; cls = sure ? 'pos' : ''; }
+    else if (d < -0.005) { verdict = `Market ${pct(-d, 1)} sharper than the math`; cls = sure ? 'neg' : ''; }
+    else verdict = 'Math and market about even';
+  }
+  const luck = e.t == null ? 'too early to say if it’s real' : sure ? `beyond luck (t ${e.t.toFixed(1)})` : `could still be luck (t ${e.t.toFixed(1)}; real at 2)`;
+  const bl = m.blend, w = bl && bl.b + bl.c > 0 ? bl.b / (bl.b + bl.c) : null;
+  return `<div class="card pad model">
+    <div class="model-verdict ${cls}">${esc(verdict)}</div>
+    <div class="row-sub">${m.games} graded game${m.games > 1 ? 's' : ''} · ${esc(luck)}${m.pending ? ` · ${m.pending} waiting on a result` : ''}</div>
+    ${calChart(m.buckets || [], m.marketBuckets || [])}
+    <div class="model-foot"><span><i class="cal-key math"></i>Math</span><span><i class="cal-key mkt"></i>Market</span>${w != null ? `<span>Best blend ${pct(w)} math</span>` : ''}</div>
   </div>`;
 }
 
@@ -894,12 +920,12 @@ function riskCard(k) {
 }
 
 const posRow = (p) => {
-  const plan = [`in at ${cents(p.avg_entry)}`, p.adds ? `${p.adds} add${p.adds > 1 ? 's' : ''}` : null, p.take_profit ? `sells at ${cents(p.take_profit)}` : null, p.mode === 'live' ? null : variantOf(p.strategy) || null].filter(Boolean).join(' · ');
+  const plan = [`in at ${cents(p.avg_entry)}`, p.adds ? `${p.adds} add${p.adds > 1 ? 's' : ''}` : null, p.take_profit ? `sells at ${cents(p.take_profit)}` : null, String(p.reason || '').startsWith('probe') ? 'probe' : null, p.mode === 'live' ? null : variantOf(p.strategy) || null].filter(Boolean).join(' · ');
   return `<div class="row with-badge">${badge(p.side_name || p.title)}<div class="row-main"><div class="row-title">${esc(p.side_name || p.side)}${p.qty ? ` <span class="faint">× ${Number(p.qty)}</span>` : ''}</div><div class="row-sub">${esc(plan)}</div></div><div class="row-end"><div class="row-amt">${cents(p.price)}</div><div class="row-meta ${p.upnl != null ? tone(p.upnl) : ''}">${p.upnl != null ? money(p.upnl, { sign: true }) : '–'}</div></div></div>`;
 };
 const histRow = (p) => {
   const how = p.status === 'settled' ? (p.result ? 'Won' : 'Lost') : 'Sold';
-  const sub = [`in at ${cents(p.avg_entry)}`, p.adds ? `${p.adds} add${p.adds > 1 ? 's' : ''}` : null, p.close_price != null && p.avg_entry != null ? clvText(p) : null, p.mode === 'live' ? null : variantOf(p.strategy) || null].filter(Boolean).join(' · ');
+  const sub = [`in at ${cents(p.avg_entry)}`, p.adds ? `${p.adds} add${p.adds > 1 ? 's' : ''}` : null, p.close_price != null && p.avg_entry != null ? clvText(p) : null, String(p.reason || '').startsWith('probe') ? 'probe' : null, p.mode === 'live' ? null : variantOf(p.strategy) || null].filter(Boolean).join(' · ');
   return `<div class="row with-badge">${badge(p.side_name || p.title)}<div class="row-main"><div class="row-title">${how} · ${esc(p.side_name || p.side)}</div><div class="row-sub">${esc(sub)}</div></div><div class="row-end"><div class="row-amt ${tone(p.pnl || 0)}">${money(p.pnl || 0, { sign: true })}</div><div class="row-meta">${p.closed_at ? ago(new Date(p.closed_at).toISOString()) : ''}</div></div></div>`;
 };
 const sigRow = (s) => `<div class="row with-badge">${signalBadge(s.kind)}<div class="row-main"><div class="row-title">${esc(SIGNAL_LABEL[s.kind] || s.kind)}</div><div class="row-sub">${esc(s.detail || s.title || s.slug)}</div></div><div class="row-end"><div class="row-amt">${s.price != null ? cents(s.price) : ''}</div><div class="row-meta">${ago(new Date(s.ts).toISOString())}</div></div></div>`;
@@ -954,7 +980,7 @@ function botRest(b) {
     if (!rows.length) return '';
     const total = rows.reduce((s, x) => s + (x.pnl || 0), 0);
     return `<div class="group-head" style="display:flex;justify-content:space-between"><span>${title}</span><span class="num ${tone(total)}">${money(total, { sign: true })}</span></div>
-      <div class="card">${rows.map((x) => `<div class="row"><div class="row-main"><div class="row-title">${esc(variantOf(x.strategy))}${L && L.strategy === x.strategy ? ' <span class="pill won">Real money</span>' : ''}</div><div class="row-sub">${x.closed ? `${x.wins}–${x.closed - x.wins} · ${x.staked ? signedPct(x.pnl / x.staked) : '–'} on ${money(x.staked)}` : 'No closed trades yet'}${x.open ? ` · ${x.open} open` : ''}${b.exits?.[x.strategy]?.early ? ` · early sells ${money(b.exits[x.strategy].vsHold, { sign: true })} vs holding` : ''}</div></div><div class="row-end strat-end">${spark(strat[x.strategy])}<div class="row-amt ${tone(x.pnl)}">${money(x.pnl, { sign: true })}</div></div></div>`).join('')}</div>`;
+      <div class="card">${rows.map((x) => `<div class="row"><div class="row-main"><div class="row-title">${esc(variantOf(x.strategy))}${L && L.strategy === x.strategy ? ' <span class="pill won">Real money</span>' : ''}</div><div class="row-sub">${x.closed ? `${x.wins}–${x.closed - x.wins} · ${x.staked ? signedPct(x.pnl / x.staked) : '–'} on ${money(x.staked)}` : 'No closed trades yet'}${x.open ? ` · ${x.open} open` : ''}${b.exits?.[x.strategy]?.early ? ` · early sells ${money(b.exits[x.strategy].vsHold, { sign: true })} vs holding` : ''}${b.records?.[x.strategy]?.f > 0 ? ` · sizing up on its record (${signedPct(b.records[x.strategy].mean)} a dollar, t ${Number(b.records[x.strategy].t).toFixed(1)})` : ''}</div></div><div class="row-end strat-end">${spark(strat[x.strategy])}<div class="row-amt ${tone(x.pnl)}">${money(x.pnl, { sign: true })}</div></div></div>`).join('')}</div>`;
   };
   const showLive = L && store.botGroup === 'live';
 
@@ -974,6 +1000,11 @@ function botRest(b) {
     ${book === 'btc' ? `<div class="section">
       <div class="section-title">Bitcoin model check<small>math vs market</small></div>
       ${modelCard(b.model)}
+    </div>` : ''}
+
+    ${book === 'sports' ? `<div class="section">
+      <div class="section-title">Sports model check<small>math vs market, per game</small></div>
+      ${sportsModelCard(b.model)}
     </div>` : ''}
 
     ${book === 'btc' && exitCard(b.exits) ? `<div class="section">
@@ -1018,7 +1049,7 @@ function botRest(b) {
         <div class="step"><div><b>Its own ${money(b.allocation, { cents: false })}</b>It trades its bankroll plus what it wins. Your money and your bets are off limits, and it skips any window where you hold a position or have orders.</div></div>
         <div class="step"><div><b>Your switch</b>Real orders only while LIVE_TRADING is on in Cloudflare, and only the Bitcoin bot has a real-money engine so far. Turn it off and it stops placing orders right away; open positions ride to their result.</div></div>
         <div class="step"><div><b>Never pays more than it saw</b>Every buy is a limit order at the price it saw, cancelled if it doesn't fill on the spot. It checks its first order with Polymarket's preview before placing anything real.</div></div>
-        <div class="step"><div><b>Bets grow with the account, inside the ladder</b>Sized off what the account is worth now and how much weight the grading gives the math over the market. Small accounts can bet up to 10% at a time; by $100K it's 1.5%. Below its high, bets shrink in step toward a floor, so a bad run can't dig a deep hole. Never more than the market can fill. Your own cap per bet (BOT_MAX_BET) beats all of it.</div></div>
+        <div class="step"><div><b>Bets grow with the account, inside the ladder</b>Sized off what the account is worth now, the blend of math and market the grading has fitted, and the strategy's own record once it has shown an edge beyond luck. When the math flags a trade nothing backs, paper strategies still buy one contract so they keep learning; real money never does. Small accounts can bet up to 10% at a time; by $100K it's 1.5%. Below its high, bets shrink in step toward a floor, so a bad run can't dig a deep hole. Never more than the market can fill. Your own cap per bet (BOT_MAX_BET) beats all of it.</div></div>
         <div class="step"><div><b>Checks its data first</b>It only trades on prices fresh off live streams, bitcoin and Polymarket both, lined up with the official index. If its math and the market are more than 15 points apart it skips the trade, and after a losing exit it stays out of that window. It sits out while Coinbase and Gemini disagree, for 20 seconds after a sudden jump, and around jobs, CPI and Fed releases.</div></div>
       </div>
     </div>`;
@@ -1041,7 +1072,7 @@ function renderLab() {
       <div class="row"><div class="row-main"><div class="row-title">Game data</div><div class="row-sub">${Number(st.live?.states || 0).toLocaleString()} score updates · ${Number(st.live?.lines || 0).toLocaleString()} closing lines</div></div><div class="row-end dim" style="font-size:15px">ESPN</div></div>
       <div class="row"><div class="row-main"><div class="row-title">Real-money trading</div><div class="row-sub">${st.money?.on ? `${esc(variantOf(st.money.strategy))} · ` : 'Off · '}${st.money?.last ? esc(String(st.money.last.detail || '').slice(0, 90)) : 'no orders yet'}</div></div><div class="row-end"><span class="pill ${st.money?.on ? 'won' : 'open'}">${st.money?.on ? 'On' : 'Off'}</span></div></div>
       <div class="row"><div class="row-main"><div class="row-title">Live prices</div><div class="row-sub">${st.crypto?.stream ? `Polymarket ${st.crypto.stream.toFixed(1)}/s` : 'Polymarket stream offline, polling every 5 s'} · ${st.crypto?.gemini ? `Gemini ${Number(st.crypto.gemini).toFixed(1)}/s` : 'Gemini offline'} · ${st.crypto?.ticker ? `Coinbase ${Number(st.crypto.ticker).toFixed(1)}/s` : 'Coinbase quiet'}</div></div><div class="row-end"><span class="pill ${st.crypto?.stream && (st.crypto?.ticker || st.crypto?.gemini) ? 'won' : 'open'}">${st.crypto?.stream && (st.crypto?.ticker || st.crypto?.gemini) ? 'Live' : st.crypto?.stream || st.crypto?.ticker || st.crypto?.gemini ? 'Partly live' : 'Polling'}</span></div></div>
-      <div class="row"><div class="row-main"><div class="row-title">Crypto windows</div><div class="row-sub">${st.crypto?.btc ? `BTC ${money(st.crypto.btc, { cents: false })} · 5m 15m 1h · ` : 'Bitcoin Up or Down · '}${Number(st.crypto?.ticks || 0).toLocaleString()} ticks · volatility ×${Number(st.crypto?.volScale || 1).toFixed(2)} · math weight ${pct(st.crypto?.mathWeight ?? 0.5)} · ${Number(st.crypto?.skipped || 0).toLocaleString()} skipped by the data check · ${Number((st.crypto?.paused?.feeds || 0) + (st.crypto?.paused?.jumps || 0) + (st.crypto?.paused?.news || 0)).toLocaleString()} held off</div></div><div class="row-end dim" style="font-size:15px">${st.crypto?.at ? ago(st.crypto.at) : 'Every 5 s'}</div></div>
+      <div class="row"><div class="row-main"><div class="row-title">Crypto windows</div><div class="row-sub">${st.crypto?.btc ? `BTC ${money(st.crypto.btc, { cents: false })} · 5m 15m 1h · ` : 'Bitcoin Up or Down · '}${Number(st.crypto?.ticks || 0).toLocaleString()} ticks · volatility ×${Number(st.crypto?.volScale || 1).toFixed(2)} · math weight ${pct(st.crypto?.mathWeight ?? 0.5)} · ${Number(st.crypto?.skipped || 0).toLocaleString()} skipped by the data check · ${Number((st.crypto?.paused?.feeds || 0) + (st.crypto?.paused?.jumps || 0) + (st.crypto?.paused?.news || 0)).toLocaleString()} held off · index copy ${st.crypto?.replicaBooks ? `on ${st.crypto.replicaBooks} of 3 books` : 'offline'}</div></div><div class="row-end dim" style="font-size:15px">${st.crypto?.at ? ago(st.crypto.at) : 'Every 5 s'}</div></div>
       <div class="row"><div class="row-main"><div class="row-title">Market recorder</div><div class="row-sub">${st.recorder ? `${st.recorder.games} games tracked · ${Number(st.recorder.totalPoints || 0).toLocaleString()} price points` : 'Starting up'}</div></div><div class="row-end dim" style="font-size:15px">${st.recorder?.last ? ago(st.recorder.last) : '–'}</div></div>
     </div>
     <div style="margin-top:12px"><button class="btn" id="lab-sync">Sync now</button></div>`;

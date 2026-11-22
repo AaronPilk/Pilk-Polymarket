@@ -11,8 +11,9 @@
 // Limits of v1, on purpose: no fouls, timeouts or injuries; in football only who has the ball
 // (worth about a point and a half), not down, distance or field position.
 
-// Standard normal CDF (Abramowitz-Stegun 7.1.26, error < 1.5e-7). Same as cryptomath.ts; kept
-// local so this file has no imports.
+import { returnStats, type ReadyRow } from './ready';
+
+// Standard normal CDF (Abramowitz-Stegun 7.1.26, error < 1.5e-7). Same as cryptomath.ts.
 export function normCdf(x: number): number {
   const t = 1 / (1 + 0.3275911 * Math.abs(x) / Math.SQRT2);
   const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-(x * x) / 2);
@@ -174,15 +175,40 @@ export function stakeFor(o: {
   fair: number; price: number; equity: number; available: number;
   fraction?: number; trust?: number; maxShare?: number; depth?: number | null; ceiling?: number | null;
   peak?: number; openNet?: number;
+  recordKelly?: number;   // the strategy's own record as a Kelly share of the account (recordKelly())
 }): number {
   const peak = Math.max(o.peak ?? o.equity, o.equity);
   const lim = riskLimits(peak);
-  const k = kellyStake(o.fair, o.price, o.equity, o.fraction ?? 0.25, o.trust ?? 0.5) * drawdownScale(o.equity, peak, lim.dd);
+  // What it wants: Kelly on the chance it believes, or on what its own record has shown, whichever
+  // is bigger. A strategy that earns its money selling early can prove an edge its calls on the
+  // result don't show.
+  const fraction = o.fraction ?? 0.25;
+  const fromChance = kellyStake(o.fair, o.price, o.equity, fraction, o.trust ?? 0.5);
+  const fromRecord = o.equity * fraction * Math.max(0, o.recordKelly ?? 0);
+  const k = Math.max(fromChance, fromRecord) * drawdownScale(o.equity, peak, lim.dd);
   let cap = Math.min(o.equity * (o.maxShare ?? lim.bet), o.available);
   if (o.openNet != null) cap = Math.min(cap, Math.max(0, o.equity * lim.open - o.openNet));
   if (o.depth != null && o.depth > 0) cap = Math.min(cap, o.depth * o.price * 0.25);
   if (o.ceiling != null && o.ceiling > 0) cap = Math.min(cap, o.ceiling);
   return Math.max(0, Math.min(k, cap));
+}
+
+// A strategy's own record as a bet size. Kelly for a bet that returns R per dollar is about
+// E[R] / E[R²]; the record bets on its return minus one standard error (hours or games as the unit,
+// see returnStats), so only on edge it has shown beyond luck, and nothing until it has 50+ closed
+// trades over 10+ hours. Never more than a full Kelly share of the account (the ladder caps it far
+// lower anyway).
+export const RECORD_MIN = { trades: 50, groups: 10 };
+export function recordKelly(rows: ReadyRow[]) {
+  const r = returnStats(rows);
+  let f = 0;
+  if (r.n >= RECORD_MIN.trades && r.groups >= RECORD_MIN.groups && r.mean != null && r.se != null && r.v != null) {
+    const edge = r.mean - r.se;
+    const m2 = r.v + r.mean * r.mean;
+    f = edge > 0 && m2 > 0 ? Math.min(1, edge / m2) : 0;
+  }
+  const r4 = (x: number | null) => (x == null ? null : Math.round(x * 10_000) / 10_000);
+  return { f: r4(f) as number, mean: r4(r.mean), se: r4(r.se), t: r.t == null ? null : Math.round(r.t * 100) / 100, n: r.n, hours: r.groups };
 }
 
 // Stop for the day after losing the ladder's day share of what the account started the day with

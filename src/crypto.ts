@@ -59,7 +59,8 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import { DEFAULT_BLEND, SCORE_POINTS, blendProb, eventFor, fairUp, gradeModel, learnOffset, parseWindow, windowEnd, windowSlug, type Blend, type Mark } from './cryptomath';
-import { dailyStopHit, stakeFor } from './fairvalue';
+import { dailyStopHit, drawdownScale, recordKelly, riskLimits, stakeFor } from './fairvalue';
+import { Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
 import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
 import { signedHeaders, type PmEnv } from './polymarket';
 import { accountPosition, cancelOrder, getOrder, openOrders, placeOrder, previewOrder, type OrderSpec } from './orders';
@@ -73,6 +74,14 @@ const CB_WS = 'https://ws-feed.exchange.coinbase.com';
 const GM_WS = 'https://api.gemini.com/v1/marketdata/BTCUSD?top_of_book=true&trades=false&auctions=false&heartbeat=true';
 const SPOT_URL = 'https://api.exchange.coinbase.com/products/BTC-USD/ticker';
 const UA = { 'User-Agent': 'pilk-bets/1.0' };
+// Full order books for the index copy (replica.ts), shadow mode. BTC_REPLICA=off turns them off.
+const BOOK_FEEDS = {
+  cb: { name: 'Coinbase', url: CB_WS, sub: { type: 'subscribe', product_ids: ['BTC-USD'], channels: ['level2_batch'] }, apply: applyCoinbase },
+  gm: { name: 'Gemini', url: 'https://api.gemini.com/v1/marketdata/BTCUSD?top_of_book=false&trades=false&auctions=false&heartbeat=true', sub: null, apply: applyGemini },
+  bs: { name: 'Bitstamp', url: 'https://ws.bitstamp.net', sub: { event: 'bts:subscribe', data: { channel: 'order_book_btcusd' } }, apply: applyBitstamp },
+} as const;
+type BookFeed = keyof typeof BOOK_FEEDS;
+const BOOK_IDS = Object.keys(BOOK_FEEDS) as BookFeed[];
 const TICK = 5_000;
 const MIN = 60_000;
 const ASSET = 'btc';
@@ -141,11 +150,13 @@ interface CryptoStrategy {
   live?: boolean;             // only on live stream data
   trigger?: 'lag' | 'fade';
   kelly?: { fraction: number };
+  makerExit?: boolean;        // exit with a resting sell at fair + exitAbove (no fee) instead of selling at the bid
 }
 const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_fair_v1', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15, exitAbove: 0.03, tauMin: 75 },
   { id: 'crypto_fair_strict', minEdge: 0.1, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15, exitAbove: 0.03, tauMin: 75 },
   { id: 'crypto_fair_max', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15, exitAbove: 0.03, tauMin: 75, kelly: { fraction: 0.5 } },
+  { id: 'crypto_fair_maker', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15, exitAbove: 0.03, tauMin: 75, makerExit: true },
   { id: 'crypto_hold_v1', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0, exitAbove: null, tauMin: 75 },
   { id: 'crypto_double_v1', minEdge: 0.02, priceMin: 0.1, priceMax: 0.45, tpBelow: 0.46, exitAbove: null, tauMin: 90 },
   { id: 'crypto_cheap_v1', minEdge: 0.03, priceMin: 0.05, priceMax: 0.2, tpBelow: 0.2, exitAbove: 0.03, tauMin: 75 },
@@ -182,6 +193,7 @@ interface CryptoEnv extends Partial<PmEnv> {
   BOT_ALLOCATION?: string;  // each paper strategy's starting account (default 100)
   BOT_MAX_BET?: string;     // Aaron's cap per bet, when set
   BTC_STREAM?: string;      // "off" turns the live streams off (polling only)
+  BTC_REPLICA?: string;     // "off" turns off the order books behind the index copy (shadow mode)
   LIVE_TRADING?: string;    // "on" lets the bot place real orders with the live account (Aaron sets it)
   LIVE_STRATEGY?: string;   // which strategy trades real money (default crypto_fair_v1)
 }
@@ -254,6 +266,18 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private tod: number[] = Array(24).fill(1); // hour-of-day volatility factors (variance, 1 = average)
   private todAt = 0;
   private todBins: Record<string, { rv: number[]; t: number[] }> = {}; // UTC day -> per hour: squared returns, seconds
+  private records = new Map<string, { f: number; mean: number | null; se: number | null; t: number | null; n: number; hours: number }>();
+  // The index copy (shadow): full books, 1 s samples, and its score at each window start
+  private bk: Record<BookFeed, { book: Book; conn: Conn | null; retryAt: number; fails: number; msgs: number }> = {
+    cb: { book: new Book(), conn: null, retryAt: 0, fails: 0, msgs: 0 },
+    gm: { book: new Book(), conn: null, retryAt: 0, fails: 0, msgs: 0 },
+    bs: { book: new Book(), conn: null, retryAt: 0, fails: 0, msgs: 0 },
+  };
+  private repSec: Array<[number, number]> = [];
+  private bookBusy = new Set<BookFeed>();
+  private prunedAt = 0;
+  private repLastSec = 0;
+  private rep = { n: 0, offset: 0, offN: 0, abs: { comp: 0, raw: 0, corr: 0 }, log: [] as Array<Record<string, number | null>> };
   private todPrev: [number, number] | null = null;
   private lostIn = new Set<string>();     // strategy|window (L: for live) closed at a loss: stay out
   private gapAt = new Map<string, number>();
@@ -286,7 +310,8 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   async fetch(_req: Request): Promise<Response> {
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm == null || alarm > Date.now() + 2 * MIN) await this.ctx.storage.setAlarm(Date.now() + 1_000);
-    return Response.json({ ok: true, alarm, spot: this.spot?.price ?? null, stream: !!this.pm, ticker: !!this.cb, gemini: !!this.gm, mult: this.mult, blend: this.blend, basis: this.basis, tod: this.tod });
+    return Response.json({ ok: true, alarm, spot: this.spot?.price ?? null, stream: !!this.pm, ticker: !!this.cb, gemini: !!this.gm, mult: this.mult, blend: this.blend, basis: this.basis, tod: this.tod,
+      replica: { price: this.repSec.at(-1)?.[1] ?? null, books: Object.fromEntries(BOOK_IDS.map((x) => [x, { up: !!this.bk[x].conn, at: this.bk[x].book.at, bids: this.bk[x].book.bids.size, asks: this.bk[x].book.asks.size, msgs: this.bk[x].msgs }])), n: this.rep.n } });
   }
 
   async alarm(): Promise<void> {
@@ -353,6 +378,14 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         this.todPrev = null;
         this.todAt = 0;
       }
+      const rb = await this.env.DB.prepare("SELECT v FROM brain WHERE k = 'btc_replica'").first<{ v: string }>();
+      const sr = rb ? JSON.parse(rb.v) : null;
+      if (sr && Number(sr.n) > 0 && sr.abs) {
+        this.rep = { n: Number(sr.n), offset: Number(sr.offset) || 0, offN: Number(sr.offN) || 0, abs: { comp: Number(sr.abs.comp) || 0, raw: Number(sr.abs.raw) || 0, corr: Number(sr.abs.corr) || 0 }, log: Array.isArray(sr.log) ? sr.log : [] };
+      }
+      const rec = await this.env.DB.prepare("SELECT v FROM brain WHERE k = 'btc_records'").first<{ v: string }>();
+      const srec = rec ? JSON.parse(rec.v) : null;
+      if (srec && typeof srec === 'object') for (const [id, r] of Object.entries(srec)) this.records.set(id, r as any);
       const bb = await this.env.DB.prepare("SELECT v FROM brain WHERE k = 'btc_basis'").first<{ v: string }>();
       const sb = bb ? JSON.parse(bb.v) : null;
       if (sb) for (const f of FEEDS) {
@@ -380,7 +413,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   }
 
   private async ensureStreams(now: number) {
-    if (this.env.BTC_STREAM === 'off') { this.drop('pm'); this.drop('cb'); this.drop('gm'); return; }
+    if (this.env.BTC_STREAM === 'off') { this.drop('pm'); this.drop('cb'); this.drop('gm'); this.dropBooks(); return; }
     const want = this.wantSlugs(now);
     const pmOk = this.pm && now - this.pm.last < STREAM_STALE && want.every((s) => this.pm!.slugs.includes(s));
     if (!pmOk && now >= this.pmRetryAt && this.env.POLYMARKET_KEY_ID && this.env.POLYMARKET_SECRET_KEY) {
@@ -409,6 +442,100 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         console.log('gemini error', String((e as any)?.message || e));
       }
     }
+    this.ensureBooks(now);
+  }
+
+  // ---------- the index copy's order books (shadow mode)
+
+  // Connects in the background: a slow exchange never holds up the price streams or the loop.
+  private ensureBooks(now: number) {
+    if (this.env.BTC_REPLICA === 'off') { this.dropBooks(); return; }
+    for (const f of BOOK_IDS) {
+      const s = this.bk[f];
+      if (this.bookBusy.has(f) || (s.conn && now - s.conn.last < STREAM_STALE) || now < s.retryAt) continue;
+      this.bookBusy.add(f);
+      void this.connectBook(f, now)
+        .then(() => { s.fails = 0; }, (e) => {
+          s.fails++;
+          s.retryAt = Date.now() + Math.min(5 * MIN, 5_000 * 2 ** s.fails);
+          console.log(`${BOOK_FEEDS[f].name} book error`, String((e as any)?.message || e));
+        })
+        .finally(() => this.bookBusy.delete(f));
+    }
+  }
+
+  private dropBooks() {
+    for (const f of BOOK_IDS) {
+      const c = this.bk[f].conn;
+      this.bk[f].conn = null;
+      if (c) try { c.ws.close(1000, 'off'); } catch {}
+    }
+  }
+
+  private async connectBook(f: BookFeed, now: number) {
+    const spec = BOOK_FEEDS[f];
+    const res = await fetch(spec.url, { headers: { ...UA, Upgrade: 'websocket' }, signal: AbortSignal.timeout(8_000) });
+    const ws = res.webSocket;
+    if (!ws) throw new Error(`refused: HTTP ${res.status}`);
+    ws.accept();
+    const conn: Conn = { ws, slugs: [], at: now, last: now, n: 0 };
+    const s = this.bk[f];
+    s.book.clear();
+    s.book.at = 0;
+    ws.addEventListener('message', (e) => this.onBook(f, conn, e.data));
+    const gone = () => { if (s.conn === conn) s.conn = null; };
+    ws.addEventListener('close', gone);
+    ws.addEventListener('error', gone);
+    if (spec.sub) ws.send(JSON.stringify(spec.sub));
+    const old = s.conn;
+    s.conn = conn;
+    if (old) try { old.ws.close(1000, 'reconnected'); } catch {}
+  }
+
+  private onBook(f: BookFeed, conn: Conn, data: unknown) {
+    const now = Date.now();
+    conn.last = now; conn.n++;
+    const s = this.bk[f];
+    if (s.conn !== conn || typeof data !== 'string') return;
+    s.msgs++;
+    let j: any;
+    try { j = JSON.parse(data); } catch { return; }
+    if (j?.event === 'bts:request_reconnect') { s.conn = null; try { conn.ws.close(1000, 'reconnect'); } catch {} return; }
+    try { if (BOOK_FEEDS[f].apply(s.book, j)) s.book.at = now; } catch { return; }
+    // One sample of the copy a second.
+    const sec = Math.floor(now / 1000);
+    if (sec === this.repLastSec) return;
+    this.repLastSec = sec;
+    const r = replicaPrice(BOOK_IDS.map((x) => this.bk[x].book), now);
+    if (!r) return;
+    // Once a minute, drop levels far from the price: the copy only reads the top of each book.
+    if (now - this.prunedAt > MIN) { this.prunedAt = now; for (const x of BOOK_IDS) this.bk[x].book.prune(r.price); }
+    this.repSec.push([now, r.price]);
+    while (this.repSec.length && this.repSec[0][0] < now - 10 * MIN) this.repSec.shift();
+  }
+
+  // At each window start: how far the copy's last-minute average (as is, and with its own learned
+  // offset) and the bot's own price landed from Polymarket's official start price.
+  private scoreReplica(start: number, official: number, now: number) {
+    const avg = (pts: Array<[number, number]>) => pts.reduce((a, [, p]) => a + p, 0) / pts.length;
+    const rp = this.repSec.filter(([ts]) => ts >= start - MIN && ts < start);
+    const cp = this.spotSec.filter(([ts]) => ts >= start - MIN && ts < start);
+    if (rp.length < 30 || cp.length < 30) return;
+    const ravg = avg(rp), cavg = avg(cp);
+    const raw = official - ravg, comp = official - cavg, corr = official - (ravg + this.rep.offset);
+    if (Math.abs(raw) > BASIS_MAX || Math.abs(comp) > BASIS_MAX) return;
+    const R = this.rep;
+    R.n++;
+    R.abs.comp += Math.abs(comp); R.abs.raw += Math.abs(raw); R.abs.corr += Math.abs(corr);
+    R.offset = learnOffset(R.offset, R.offN, raw, BASIS_ALPHA);
+    R.offN++;
+    R.log.push({ ts: start, official: r2(official), comp: r2(comp), raw: r2(raw), corr: r2(corr), books: BOOK_IDS.filter((x) => now - this.bk[x].book.at <= 10_000).length });
+    while (R.log.length > 24) R.log.shift();
+    this.pendingStmts.push(this.env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
+      .bind('btc_replica', JSON.stringify({
+        n: R.n, offset: r2(R.offset), offN: R.offN, abs: R.abs,
+        mae: { comp: r2(R.abs.comp / R.n), raw: r2(R.abs.raw / R.n), corr: r2(R.abs.corr / R.n) }, log: R.log,
+      }), now));
   }
 
   private drop(which: 'pm' | 'cb' | 'gm') {
@@ -568,6 +695,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private learnBasis(start: number, official: number, now: number) {
     if (this.basisAt.has(start) || now - start > 10 * MIN) return;
     this.basisAt.add(start);
+    try { this.scoreReplica(start, official, now); } catch (e) { console.log('replica score error', String((e as any)?.message || e)); }
     const row: { ts: number; official: number; cb: number | null; gm: number | null } = { ts: start, official: r2(official), cb: null, gm: null };
     for (const f of FEEDS) {
       const pts = this.feedSec[f].filter(([ts]) => ts >= start - MIN && ts < start);
@@ -986,15 +1114,22 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         if (!dailyStopHit(bank.equity, bank.today, bank.peak)) {
           const stake = stakeFor({
             fair: this.sizingProb(best, mid), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
-            fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(),
+            fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(), recordKelly: this.records.get(st.id)?.f ?? 0,
           });
-          const qty = Math.floor(stake / best.ask);
+          let qty = Math.floor(stake / best.ask);
+          // A probe: the math flagged the trade but neither the blend nor the record backs a real
+          // bet. On paper it still buys one contract, so every strategy keeps learning.
+          // It stays inside the ladder: room under the one-bet and all-open limits, and none at the floor.
+          const lim = riskLimits(Math.max(bank.peak, bank.equity));
+          const room = Math.min(bank.available, bank.equity * lim.bet, Math.max(0, bank.equity * lim.open - bank.openNet));
+          const probe = qty < 1 && best.ask <= room && drawdownScale(bank.equity, Math.max(bank.peak, bank.equity), lim.dd) > 0 && (best.depth == null || best.depth >= 1);
+          if (probe) qty = 1;
           if (qty >= 1) {
             const pos = await openPosition(this.env.DB, {
               strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side,
               sideName: `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`, ask: best.ask, qty, coef: COEF,
-              reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${leftText(tau)}${src === 'stream' ? ', on stream' : ''}`, now, tpBelow: st.tpBelow,
-              meta: { fair: r4(best.fair), edge: r4(best.edge), mid: midSide == null ? null : r4(midSide), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, blend: this.blend, p: r4(this.sizingProb(best, mid)), feeds: this.feedsNow(now), src, equity: r2(bank.equity) },
+              reason: `${probe ? 'probe: ' : ''}fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${leftText(tau)}${src === 'stream' ? ', on stream' : ''}`, now, tpBelow: st.tpBelow,
+              meta: { fair: r4(best.fair), edge: r4(best.edge), mid: midSide == null ? null : r4(midSide), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, blend: this.blend, p: r4(this.sizingProb(best, mid)), record: this.records.get(st.id)?.f ?? 0, probe, feeds: this.feedsNow(now), src, equity: r2(bank.equity) },
             });
             pos.mode = 'paper';
             this.open.push(pos);
@@ -1015,10 +1150,10 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     if (dailyStopHit(bank.equity, bank.today, bank.peak)) return;
     const stake = stakeFor({
       fair: this.sizingProb(best, mid), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
-      fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(),
+      fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(), recordKelly: this.records.get(st.id)?.f ?? 0,
     });
     const qty = Math.floor(stake / best.ask);
-    if (qty < 1) return;
+    if (qty < 1) return;   // real money: no probes
     // Never trade a window where the account holds anything, or has orders the bot didn't place:
     // those are Aaron's, and the exchange would net them against the bot's.
     const [held, orders] = await Promise.all([accountPosition(env, w.slug), openOrders(env, w.slug)]);
@@ -1135,6 +1270,16 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     const st = BY_ID.get(p.strategy);
     if (!st || st.exitAbove == null || fair == null || tau < (st.tauMax != null ? 8 : 20)) return;
     const fairSide = p.side === 'long' ? fair : 1 - fair;
+    if (st.makerExit) {
+      // A resting sell kept at fair + exitAbove (re-priced as fair moves). It fills, with no fee,
+      // only once buyers bid up to it, the same rule as the 2x take-profit.
+      const target = Math.min(0.99, r4(fairSide + st.exitAbove));
+      if (bidSide >= target) {
+        await closePosition(this.env.DB, p, { price: target, coef: COEF, maker: true, reason: `resting sell at ${cents(target)} (fair ${cents(fairSide)}), ${leftText(tau)}`, now });
+        this.closed(p, now);
+      }
+      return;
+    }
     const key = `x|${p.id}`;
     if (bidSide < fairSide + feePer(bidSide) + st.exitAbove) { this.seen.delete(key); return; }
     if (src === 'stream') {
@@ -1423,6 +1568,16 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     if (g.blendNext) this.blend = g.blendNext;
     await this.env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
       .bind('btc_model', JSON.stringify({ ...g, mult: this.mult, active: this.blend, ready: g.windows >= 100, need: 100 }), now).run();
+    // Each strategy's own record since the fix (trades carrying the feed record): what it has shown
+    // per dollar bet, as a Kelly share it may size on (fairvalue.ts recordKelly).
+    const rows = (await this.env.DB.prepare(`SELECT strategy, pnl, cost, closed_at / 3600000 AS hr FROM bot_positions
+      WHERE mode = 'paper' AND status != 'open' AND strategy LIKE 'crypto_%' AND json_extract(meta, '$.feeds') IS NOT NULL`)
+      .all<{ strategy: string; pnl: number; cost: number; hr: number }>()).results;
+    const by = new Map<string, Array<{ pnl: number; cost: number; group: number }>>();
+    for (const r of rows) { const a = by.get(r.strategy) || []; a.push({ pnl: r.pnl, cost: r.cost, group: r.hr }); by.set(r.strategy, a); }
+    this.records = new Map([...by].map(([id, a]) => [id, recordKelly(a)]));
+    await this.env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
+      .bind('btc_records', JSON.stringify(Object.fromEntries(this.records)), now).run();
   }
 
   // ---------- counters for the dashboard
@@ -1447,6 +1602,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     stmts.push(set.bind('gm_stream', gmLive ? Math.round((this.gmMsgs / secs) * 10) : 0, now));
     stmts.push(set.bind('btc_trust', Math.round(this.blend.b * 100), now));   // weight on the math, in hundredths
     stmts.push(set.bind('btc_mult', Math.round(this.mult * 100), now));
+    stmts.push(set.bind('replica_books', BOOK_IDS.filter((x) => now - this.bk[x].book.at <= 10_000).length, now));
     await this.env.DB.batch(stmts);
     this.counts = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0, feed_skips: 0, jump_skips: 0, event_skips: 0 };
     this.pmMsgs = 0; this.cbMsgs = 0; this.gmMsgs = 0;

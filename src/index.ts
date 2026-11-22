@@ -4,6 +4,7 @@ import { bankroll } from './paper';
 import { RISK_LADDER, drawdownScale, riskLimits } from './fairvalue';
 import { readiness } from './ready';
 import { nextEvent } from './cryptomath';
+import { gradeSports, type SportsMark } from './sportsgrade';
 export { LiveFeed } from './live';
 export { CryptoFeed } from './crypto';
 
@@ -85,6 +86,8 @@ export default {
       if (sports) {
         try { await settleMarkets(env, now); }
         catch (e: any) { await logSync(env, false, 0, `settle: ${e?.message || e}`); }
+        // Twice an hour, right after settling: grade the Sports bot's math on finished games.
+        if (now.getUTCMinutes() % 30 === 0) await gradeSportsBook(env).catch((e) => console.log('sports grading error', String(e?.message || e)));
       }
       await sync(env).catch((e) => logSync(env, false, 0, String(e?.message || e)));
     })());
@@ -136,6 +139,7 @@ async function state(env: Env) {
       mathWeight: S.btc_trust ? S.btc_trust.n / 100 : 0.5,   // the blend's weight on the math (stored in hundredths)
       skipped: S.gap_skips?.n ?? 0,
       paused: { feeds: S.feed_skips?.n ?? 0, jumps: S.jump_skips?.n ?? 0, news: S.event_skips?.n ?? 0 },
+      replicaBooks: fresh(S.replica_books) ? S.replica_books.n : 0,   // order books behind the index copy, of 3
     },
     money: {
       on: env.LIVE_TRADING === 'on', strategy: env.LIVE_STRATEGY || 'crypto_fair_v1', sports: env.SPORTS !== 'off',
@@ -145,6 +149,15 @@ async function state(env: Env) {
     lastSync: last ? { t: last.t, ok: !!last.ok, added: last.added, msg: last.msg } : null,
     apiConfigured: !!(env.POLYMARKET_KEY_ID && env.POLYMARKET_SECRET_KEY),
   };
+}
+
+// The Sports bot's math vs the market on finished games (sportsgrade.ts), saved for the app.
+async function gradeSportsBook(env: Env) {
+  const { results } = await env.DB.prepare(`SELECT h.slug, h.point AS target, h.fair, h.bid, h.ask, m.result, m.league
+    FROM hoops_marks h JOIN markets m ON m.slug = h.slug WHERE m.result IS NOT NULL`).all<SportsMark>();
+  const g = gradeSports(results);
+  await env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
+    .bind('hoops_model', JSON.stringify(g), Date.now()).run();
 }
 
 // ---------- the bot's own ledger (never mixed with Aaron's trades)
@@ -204,7 +217,7 @@ async function bot(env: Env, book: Book) {
   const signals = await q<any>(`SELECT s.slug, s.ts, s.kind, s.side, s.price, s.ref, s.detail, m.title, m.league
     FROM signals s LEFT JOIN markets m ON m.slug = s.slug WHERE ${book === 'btc' ? isBtcSlug : `NOT ${isBtcSlug}`} ORDER BY s.ts DESC LIMIT 30`);
 
-  let live = null, model = null, ready = null, exits = null, riskFor: { strategy?: string; mode: 'paper' | 'live' };
+  let live = null, model = null, ready = null, exits = null, records = null, riskFor: { strategy?: string; mode: 'paper' | 'live' };
   if (book === 'btc') {
     // The Bitcoin bot's real-money account (only bitcoin has a live engine so far).
     const anyLive = (await q<{ n: number }>(`SELECT COUNT(*) AS n FROM bot_positions WHERE mode = 'live'${scope}`))[0]?.n || 0;
@@ -214,16 +227,18 @@ async function bot(env: Env, book: Book) {
       : null;
     // What the bitcoin model has learned: its latest self-grading (every half hour), each
     // exchange's offset to the official index (every window start), trades the data check refused.
-    const brainRows = await q<{ k: string; v: string; at: number }>("SELECT k, v, at FROM brain WHERE k IN ('btc_model', 'btc_basis', 'btc_tod')");
+    const brainRows = await q<{ k: string; v: string; at: number }>("SELECT k, v, at FROM brain WHERE k IN ('btc_model', 'btc_basis', 'btc_tod', 'btc_replica', 'btc_records')");
     const fromBrain = (k: string) => {
       const r = brainRows.find((x) => x.k === k);
       try { return r ? { ...JSON.parse(r.v), at: r.at } : null; } catch { return null; }
     };
-    const graded = fromBrain('btc_model'), basis = fromBrain('btc_basis'), tod = fromBrain('btc_tod');
+    const graded = fromBrain('btc_model'), basis = fromBrain('btc_basis'), tod = fromBrain('btc_tod'), replica = fromBrain('btc_replica');
+    records = fromBrain('btc_records');
+    if (tod) delete tod.bins;
     const st = Object.fromEntries((await q<{ k: string; n: number }>(
       "SELECT k, n FROM stats WHERE k IN ('gap_skips', 'feed_skips', 'jump_skips', 'event_skips')")).map((r) => [r.k, r.n]));
     model = {
-      ...(graded || {}), basis, tod, skips: st.gap_skips || 0,
+      ...(graded || {}), basis, tod, replica, skips: st.gap_skips || 0,
       // Times it held off: the exchanges disagreed, bitcoin had just jumped, a release was due
       paused: { feeds: st.feed_skips || 0, jumps: st.jump_skips || 0, news: st.event_skips || 0 },
       nextEvent: nextEvent(Date.now()),
@@ -260,6 +275,9 @@ async function bot(env: Env, book: Book) {
       WHERE mode = 'paper' AND strategy = ? AND status != 'open' ORDER BY closed_at`, id);
     const games = (await q<{ n: number }>(`SELECT COUNT(DISTINCT market_slug) AS n FROM bot_positions WHERE mode = 'paper' AND strategy = ? AND status != 'open'`, id))[0]?.n || 0;
     ready = { strategy: id, ...readiness(rows, allocation, null, { kind: 'sports', games }) };
+    const hm = (await q<{ v: string; at: number }>("SELECT v, at FROM brain WHERE k = 'hoops_model'"))[0];
+    const pending = (await q<{ n: number }>('SELECT COUNT(DISTINCT h.slug) AS n FROM hoops_marks h JOIN markets m ON m.slug = h.slug WHERE m.result IS NULL'))[0]?.n || 0;
+    try { model = { ...(hm ? JSON.parse(hm.v) : { games: 0 }), at: hm?.at ?? null, pending }; } catch { model = { games: 0, pending }; }
     riskFor = { strategy: id, mode: 'paper' };
   }
 
@@ -289,7 +307,7 @@ async function bot(env: Env, book: Book) {
 
   return {
     book, books: Object.keys(BOOKS), mode: liveOn ? 'live' : 'paper', allocation, sports,
-    model, live, ready, risk, compare, exits,
+    model, live, ready, risk, compare, exits, records,
     // This bot's paper accounts
     ...paper, signals, byStrategy,
   };

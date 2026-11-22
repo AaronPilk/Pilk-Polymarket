@@ -22,6 +22,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { ESPN_PATHS, fetchScoreboard, gameLine, gameState, longSide, matchEvent } from './espn';
 import { LEAGUE, dailyStopHit, isBlowout, riskLimits, shareLeft, sportFair, stakeFor } from './fairvalue';
 import { addToPosition, bankroll, closePosition, loadOpen, openPosition, settlePosition, type Position } from './paper';
+import { SPORTS_POINTS, SPORTS_POINT_TOL } from './sportsgrade';
 
 const GATEWAY = 'https://gateway.polymarket.us';
 const UA = { 'User-Agent': 'pilk-bets/1.0' };
@@ -149,6 +150,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
   private lastState = new Map<string, { key: string; at: number; clock: string | null }>();
   private lastLine = new Map<string, string>();
   private finishedAt = new Map<string, number>();
+  private marked = new Set<string>();                        // slug|point: the grading checkpoint is written
   private counts: Record<Kind, number> = { ticks: 0, game_states: 0, lines: 0, signals: 0 };
   private lastAt: Record<Kind, number> = { ticks: 0, game_states: 0, lines: 0, signals: 0 };
   private flushedAt = 0;
@@ -194,7 +196,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
       const quotes = await this.recordQuotes(games, now, stmts);
       await this.recordGame(games, now, stmts);
       this.triage(games, quotes, now, stmts);
-      try { await this.paperHoops(games, quotes, now); } catch (e) { console.log('hoops paper error', String((e as any)?.message || e)); }
+      try { await this.paperHoops(games, quotes, now, stmts); } catch (e) { console.log('hoops paper error', String((e as any)?.message || e)); }
       for (let i = 0; i < stmts.length; i += 100) await this.env.DB.batch(stmts.slice(i, i + 100));
       await this.flush(now, active, false, games.filter((m) => this.inFocus(m.slug, now)).length);
     } catch (e) {
@@ -449,7 +451,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
     }
   }
 
-  private async paperHoops(games: LiveMarket[], quotes: Map<string, Quote>, now: number) {
+  private async paperHoops(games: LiveMarket[], quotes: Map<string, Quote>, now: number, stmts: D1PreparedStatement[]) {
     const db = this.env.DB;
     const allocation = Number(this.env.BOT_ALLOCATION || 100) || 100;
     if (now - this.openAt > 30_000) {
@@ -487,6 +489,15 @@ export class LiveFeed extends DurableObject<LiveEnv> {
       const leadLong = lh ? g.homeScore - g.awayScore : g.awayScore - g.homeScore;
       const fairLong = sportFair({ league: m.league, lead: leadLong, left, startPrice: s0 });
       const fresh = now - g.at <= 25_000;
+      // Grading checkpoints (sportsgrade.ts): once per game at each fixed point, the first time the
+      // game is just past it, what the math said and the market's quote.
+      if (fresh) for (const pt of SPORTS_POINTS) {
+        const k = `${m.slug}|${pt}`;
+        if (this.marked.has(k) || left > pt || left < pt - SPORTS_POINT_TOL) continue;
+        this.marked.add(k);
+        stmts.push(db.prepare('INSERT OR IGNORE INTO hoops_marks (slug, point, ts, league, share_left, lead, fair, bid, ask, start) VALUES (?,?,?,?,?,?,?,?,?,?)')
+          .bind(m.slug, pt, now, m.league, Math.round(left * 10_000) / 10_000, leadLong, Math.round(fairLong * 10_000) / 10_000, q.bid, q.ask, s0));
+      }
       const secs = clockSeconds(g.clock);
       const settled = now - g.scoreSince >= (secs === 0 ? SETTLE_BREAK : SETTLE_LIVE);
       const buzzer = secs != null && secs > 0 && secs <= 30;

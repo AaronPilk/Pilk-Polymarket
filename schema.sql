@@ -220,3 +220,12 @@ CREATE TABLE IF NOT EXISTS brain (k TEXT PRIMARY KEY, v TEXT NOT NULL, at INTEGE
 CREATE TABLE IF NOT EXISTS live_events (ts INTEGER NOT NULL, kind TEXT NOT NULL, slug TEXT, detail TEXT);
 CREATE INDEX IF NOT EXISTS idx_live_events_ts ON live_events(ts);
 -- Added Nov 22 (existing databases: ALTER TABLE windows ADD COLUMN official REAL).
+
+-- The Sports bot's grading checkpoints (sportsgrade.ts): one row per game at each fixed point of the
+-- game (share of regulation left 0.75 / 0.5 / 0.25 / 0.1), what the math said and the market quote,
+-- long side. Graded against markets.result once the game is final. Added Nov 22.
+CREATE TABLE IF NOT EXISTS hoops_marks (
+  slug TEXT NOT NULL, point REAL NOT NULL, ts INTEGER NOT NULL, league TEXT,
+  share_left REAL, lead INTEGER, fair REAL, bid REAL, ask REAL, start REAL,
+  PRIMARY KEY (slug, point)
+) WITHOUT ROWID;
