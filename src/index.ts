@@ -252,7 +252,8 @@ async function bot(env: Env, book: Book) {
       WHERE mode = 'paper' AND strategy = ? AND status != 'open' AND json_extract(meta, '$.feeds') IS NOT NULL ORDER BY closed_at`, liveId);
     ready = { strategy: liveId, ...readiness(rows, allocation, graded) };
     riskFor = live?.record?.closed ? { mode: 'live' } : { strategy: liveId, mode: 'paper' };
-    // Selling early vs holding to the result, per strategy: what each early sale got, against what
+    // Selling early vs holding to the result, per strategy, since the Nov 22 fix (trades carrying the
+    // feed record, the same scope as the readiness card): what each early sale got, against what
     // its contracts paid when the window settled ($1 if its side won, nothing if not). Positive:
     // selling beat holding. Split into losers sold early (what selling saved) and winners sold
     // early (what holding would have added).
@@ -264,7 +265,7 @@ async function bot(env: Env, book: Book) {
       FROM (SELECT p.*, (p.side = 'long') = (w.result = 1) AS won,
               (SELECT COALESCE(SUM(o.filled_qty), 0) FROM bot_orders o WHERE o.position_id = p.id AND o.action = 'buy') AS shares
             FROM bot_positions p JOIN windows w ON w.slug = p.market_slug AND w.result IS NOT NULL
-            WHERE p.mode = 'paper' AND p.status != 'open'${scope.replace('strategy', 'p.strategy')}) p
+            WHERE p.mode = 'paper' AND p.status != 'open'${scope.replace('strategy', 'p.strategy')} AND json_extract(p.meta, '$.feeds') IS NOT NULL) p
       GROUP BY p.strategy`);
     exits = Object.fromEntries(ex.map((r) => [r.strategy, { n: r.n, early: r.early || 0, winners: r.winners || 0, vsHold: r.vsHold || 0, saved: r.saved || 0, gaveUp: r.gaveUp || 0 }]));
   } else {

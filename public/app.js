@@ -678,13 +678,16 @@ function paintBotHero() {
   el.textContent = money(v, { sign: true });
   const parts = [];
   if (live && b.live) parts.push(`<span>Account <b>${money(b.live.equity)}</b></span>`);
+  // Paper: every strategy runs its own account, so the total is out of all of them together.
+  const nAcc = Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === BOOK_GROUP[b.book || 'btc']).length;
+  const paperCap = nAcc * (b.allocation || 100);
+  if (!live && paperCap > 0) parts.push(`<span><b class="${tone(v)}">${signedPct(v / paperCap)}</b> of ${money(paperCap, { cents: false })} paper (${nAcc} accounts × ${money(b.allocation, { cents: false })})</span>`);
   if (S) {
     const n = S.wins + S.losses;
     parts.push(n ? `<span><b>${S.wins}–${S.losses}</b> on ${n} closed</span>` : '<span>Nothing closed in this range</span>');
     if (Math.abs(S.open) >= 0.005) parts.push(`<span>Open <b class="${tone(S.open)}">${money(S.open, { sign: true })}</b></span>`);
   }
   if (live && b.live) parts.push(`<span>Trading <b>${esc(variantOf(b.live.strategy))}</b></span>`);
-  if (!live) parts.push(`<span><b>${Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === BOOK_GROUP[b.book || 'btc']).length}</b> strategies, <b>${money(b.allocation, { cents: false })}</b> each</span>`);
   $('#bot-sub').innerHTML = parts.join('');
 }
 
@@ -1008,7 +1011,7 @@ function botRest(b) {
     </div>` : ''}
 
     ${book === 'btc' && exitCard(b.exits) ? `<div class="section">
-      <div class="section-title">Sell early or hold?<small>against how each window settled</small></div>
+      <div class="section-title">Sell early or hold?<small>since the 4 PM fix, against how each window settled</small></div>
       ${exitCard(b.exits)}
     </div>` : ''}
 
