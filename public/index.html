@@ -67,12 +67,22 @@
       </div>
     </section>
 
-    <!-- Lab -->
-    <section class="view" id="view-lab" data-title="Bot Lab">
+    <!-- Bot -->
+    <section class="view" id="view-bot" data-title="Bot">
       <div class="ptr" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3a9 9 0 1 0 9 9"/></svg></div>
       <div class="content">
-        <h1 class="large-title">Bot Lab</h1>
-        <p class="subtitle">Test strategies on paper before any real money moves.</p>
+        <h1 class="large-title">Bot</h1>
+        <p class="subtitle">Its own bankroll and its own trades. Your bets never show up here.</p>
+        <div id="bot-body"></div>
+      </div>
+    </section>
+
+    <!-- Lab -->
+    <section class="view" id="view-lab" data-title="Lab">
+      <div class="ptr" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3a9 9 0 1 0 9 9"/></svg></div>
+      <div class="content">
+        <h1 class="large-title">Lab</h1>
+        <p class="subtitle">The data feeds and sync behind the bot, running on Cloudflare.</p>
         <div id="lab-body"></div>
       </div>
     </section>
@@ -97,7 +107,11 @@
         <svg viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="13" r="9.5"/><path d="M13 7.5V13l3.5 2.5"/></svg>
         Activity
       </button>
-      <button class="tab" data-view="lab" aria-label="Bot Lab">
+      <button class="tab" data-view="bot" aria-label="Bot">
+        <svg viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8.5" width="18" height="13" rx="4"/><path d="M13 8.5V5"/><circle cx="13" cy="3.8" r="1.1"/><path d="M9.6 14.2v1.6M16.4 14.2v1.6"/></svg>
+        Bot
+      </button>
+      <button class="tab" data-view="lab" aria-label="Lab">
         <svg viewBox="0 0 26 26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 3.5h6M11 3.5v6.2L5.2 19.6A2 2 0 0 0 7 22.5h12a2 2 0 0 0 1.8-2.9L15 9.7V3.5"/><path d="M7.5 16h11"/></svg>
         Lab
       </button>

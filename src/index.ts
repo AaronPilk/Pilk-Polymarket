@@ -1,11 +1,15 @@
 import { aggregateOrder, isApiFill, normalize, parseFill, pm, type Fill, type PmEnv, type Row } from './polymarket';
 import { recordMarkets, settleMarkets } from './recorder';
 export { LiveFeed } from './live';
+export { CryptoFeed } from './crypto';
 
 interface Env extends PmEnv {
   DB: D1Database;
   ASSETS: Fetcher;
   LIVE: DurableObjectNamespace;
+  CRYPTO: DurableObjectNamespace;
+  BOT_ALLOCATION?: string;  // the bot's bankroll in dollars, set by Aaron only (default 30)
+  LIVE_TRADING?: string;    // must equal "on" before the bot may place real orders (default off)
   DASH_PASSWORD?: string;   // wrangler secret put DASH_PASSWORD
   SESSION_SECRET?: string;  // wrangler secret put SESSION_SECRET (any long random string)
 }
@@ -33,6 +37,7 @@ export default {
       if (url.pathname === '/api/activities' && req.method === 'GET') return json(await listActivities(env));
       if (url.pathname === '/api/state' && req.method === 'GET') return json(await state(env));
       if (url.pathname === '/api/sync' && req.method === 'POST') return json(await sync(env));
+      if (url.pathname === '/api/bot' && req.method === 'GET') return json(await bot(env));
       if (url.pathname === '/api/paper') {
         if (req.method === 'GET') return json(await listPaper(env));
         if (req.method === 'POST') return json(await addPaper(env, await req.json()));
@@ -59,6 +64,7 @@ export default {
     const fullTick = now.getUTCMinutes() % 15 === 0;
     // Keep the live feed's 5-second loop alive (it sleeps itself when no game is on).
     ctx.waitUntil(env.LIVE.get(env.LIVE.idFromName('live')).fetch('https://live/kick').catch(() => undefined));
+    ctx.waitUntil(env.CRYPTO.get(env.CRYPTO.idFromName('btc')).fetch('https://crypto/kick').catch(() => undefined));
     ctx.waitUntil((async () => {
       try { await recordMarkets(env, now, fullTick); }
       catch (e: any) { if (fullTick) await logSync(env, false, 0, `recorder: ${e?.message || e}`); }
@@ -93,12 +99,63 @@ async function state(env: Env) {
   for (const r of rows?.results || []) S[r.k] = r;
   const iso = (ms: number | null | undefined) => (ms ? new Date(ms).toISOString() : null);
   const liveFresh = !!S.live_now?.last && Date.now() - (S.live_now.last as number) < 3 * 60_000;
+  const lastSignal = await env.DB.prepare('SELECT s.kind, s.ts, s.side, s.price, s.detail, m.title FROM signals s LEFT JOIN markets m ON m.slug = s.slug ORDER BY s.ts DESC LIMIT 1')
+    .first<{ kind: string; ts: number; side: string | null; price: number | null; detail: string | null; title: string | null }>().catch(() => null);
   return {
     recorder: { games: games?.n ?? 0, totalPoints: S.prices?.n ?? 0, last: iso(S.prices?.last) },
-    live: { now: liveFresh ? S.live_now.n : 0, ticks: S.ticks?.n ?? 0, states: S.game_states?.n ?? 0, lines: S.lines?.n ?? 0, last: iso(S.ticks?.last) },
+    live: {
+      now: liveFresh ? S.live_now.n : 0, focus: liveFresh ? S.focus_now?.n ?? 0 : 0,
+      ticks: S.ticks?.n ?? 0, states: S.game_states?.n ?? 0, lines: S.lines?.n ?? 0, last: iso(S.ticks?.last),
+      signals: (S.signals?.n ?? 0) + (S.crypto_signals?.n ?? 0),
+      lastSignal: lastSignal ? { ...lastSignal, ts: iso(lastSignal.ts) } : null,
+    },
+    crypto: {
+      btc: S.btc_cents ? S.btc_cents.n / 100 : null, at: iso(S.btc_cents?.last),
+      ticks: S.crypto_ticks?.n ?? 0, signals: S.crypto_signals?.n ?? 0,
+    },
     snapshot: snap ? { t: snap.t, cash: snap.cash, positions: snap.positions, portfolio: snap.portfolio, reserved: snap.reserved } : null,
     lastSync: last ? { t: last.t, ok: !!last.ok, added: last.added, msg: last.msg } : null,
     apiConfigured: !!(env.POLYMARKET_KEY_ID && env.POLYMARKET_SECRET_KEY),
+  };
+}
+
+// ---------- the bot's own ledger (never mixed with Aaron's trades)
+
+async function bot(env: Env) {
+  const allocation = Number(env.BOT_ALLOCATION || 30) || 30;
+  const mode = env.LIVE_TRADING === 'on' ? 'live' : 'paper';
+  const q = async <T>(sql: string, ...args: unknown[]): Promise<T[]> =>
+    (await env.DB.prepare(sql).bind(...args).all<T>().catch(() => ({ results: [] as T[] }))).results;
+
+  const open = await q<any>("SELECT * FROM bot_positions WHERE mode = ? AND status = 'open' ORDER BY opened_at DESC LIMIT 50", mode);
+  const history = await q<any>("SELECT * FROM bot_positions WHERE mode = ? AND status != 'open' ORDER BY closed_at DESC LIMIT 100", mode);
+  const totals = (await q<{ realized: number | null; n: number; wins: number }>(
+    "SELECT SUM(pnl) AS realized, COUNT(*) AS n, SUM(pnl > 0) AS wins FROM bot_positions WHERE mode = ? AND status != 'open'", mode))[0];
+
+  // Live price for each open position, and its orders (adds, the resting take-profit).
+  let unrealized = 0, atRisk = 0;
+  const positions = [];
+  for (const p of open) {
+    const t = (await q<{ bid: number | null; ask: number | null; ts: number }>(
+      'SELECT bid, ask, ts FROM ticks WHERE slug = ? ORDER BY ts DESC LIMIT 1', p.market_slug))[0];
+    const exit = t ? (p.side === 'long' ? t.bid : t.ask != null ? 1 - t.ask : null) : null;
+    const value = exit != null ? exit * (p.qty || 0) : null;
+    const netIn = (p.cost || 0) - (p.proceeds || 0);
+    const upnl = value != null ? value - netIn : null;
+    if (upnl != null) unrealized += upnl;
+    atRisk += Math.max(0, netIn);
+    const orders = await q<any>('SELECT ts, action, price, qty, status, reason FROM bot_orders WHERE position_id = ? ORDER BY ts', p.id);
+    positions.push({ ...p, price: exit, priceAt: t?.ts ?? null, value, upnl, orders });
+  }
+  const realized = totals?.realized || 0;
+  const signals = await q<any>(`SELECT s.slug, s.ts, s.kind, s.side, s.price, s.ref, s.detail, m.title, m.league
+    FROM signals s LEFT JOIN markets m ON m.slug = s.slug ORDER BY s.ts DESC LIMIT 30`);
+  return {
+    mode, allocation, realized, unrealized, atRisk,
+    equity: allocation + realized + unrealized,
+    available: Math.max(0, allocation + realized - atRisk),
+    record: { closed: totals?.n || 0, wins: totals?.wins || 0 },
+    positions, history, signals,
   };
 }
 

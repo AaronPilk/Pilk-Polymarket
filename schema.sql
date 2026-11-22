@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS markets (
   last_bid REAL, last_ask REAL,     -- latest quote for the long side
   result INTEGER,                   -- 1 long side won, 0 short side won, NULL unsettled
   settled_at TEXT, updated_at TEXT,
-  espn_id TEXT
+  espn_id TEXT,
+  start_mid REAL                -- long-side mid at tip-off (live feed)
 );
 CREATE INDEX IF NOT EXISTS idx_markets_start ON markets(game_start);
 
@@ -117,3 +118,80 @@ CREATE TABLE IF NOT EXISTS stats (
   n INTEGER NOT NULL DEFAULT 0,
   last INTEGER                              -- epoch ms of the latest write
 );
+
+-- The bot's eye: every trigger that put a game in focus, with the price at that moment.
+-- Graded later against how the game ended and how far the price moved after.
+CREATE TABLE IF NOT EXISTS signals (
+  slug TEXT NOT NULL,
+  ts INTEGER NOT NULL,                      -- epoch ms
+  kind TEXT NOT NULL,                       -- favorite_fade / swing / cheap_spike / late_close
+  side TEXT,                                -- long / short: the side the signal points at
+  price REAL,                               -- that side's ask (bid for cheap_spike) at the signal
+  ref REAL,                                 -- tip-off price (favorite_fade) or price 2 minutes earlier
+  detail TEXT,
+  PRIMARY KEY (slug, ts, kind)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(ts);
+
+-- Crypto feed: bitcoin spot (Coinbase) every 5 s, and each Up/Down window.
+CREATE TABLE IF NOT EXISTS spot (
+  asset TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  price REAL NOT NULL,
+  PRIMARY KEY (asset, ts)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS windows (
+  slug TEXT PRIMARY KEY,                    -- cpc-btc-updown-5m-2026-11-22-1810z
+  asset TEXT, series TEXT,                  -- btc, 5m / 15m / 1h
+  start_ts INTEGER, end_ts INTEGER,
+  strike REAL,                              -- our estimate of the official start price
+  result INTEGER,                           -- 1 = Up, 0 = Down
+  settled_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_windows_end ON windows(end_ts);
+
+-- The bot's own ledger. Aaron's trades never go here, the bot's never go in activities.
+CREATE TABLE IF NOT EXISTS bot_positions (
+  id TEXT PRIMARY KEY,
+  mode TEXT NOT NULL,                       -- paper | live
+  strategy TEXT,
+  market_slug TEXT NOT NULL,
+  title TEXT,                               -- game or market
+  side TEXT NOT NULL,                       -- long | short
+  side_name TEXT,                           -- team or outcome held
+  status TEXT NOT NULL DEFAULT 'open',      -- open | closed | settled
+  opened_at INTEGER NOT NULL,
+  closed_at INTEGER,
+  qty REAL NOT NULL DEFAULT 0,              -- contracts still held
+  avg_entry REAL,
+  cost REAL NOT NULL DEFAULT 0,             -- dollars in, fees included
+  proceeds REAL NOT NULL DEFAULT 0,         -- dollars out from sells and settlement, after fees
+  fees REAL NOT NULL DEFAULT 0,
+  adds INTEGER NOT NULL DEFAULT 0,
+  take_profit REAL,                         -- resting take-profit price
+  pnl REAL,                                 -- proceeds - cost once closed
+  result INTEGER,                           -- 1 won / 0 lost if held to settlement
+  close_price REAL,                         -- price at start, for closing-line value
+  reason TEXT                               -- what opened it (signal kind)
+);
+CREATE INDEX IF NOT EXISTS idx_bot_positions_status ON bot_positions(mode, status, opened_at);
+CREATE TABLE IF NOT EXISTS bot_orders (
+  id TEXT PRIMARY KEY,                      -- our client order id; live orders carry it to the exchange
+  position_id TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  mode TEXT NOT NULL,                       -- paper | live
+  market_slug TEXT NOT NULL,
+  side TEXT NOT NULL,                       -- long | short
+  action TEXT NOT NULL,                     -- buy | sell
+  order_type TEXT,                          -- limit (resting) | market
+  price REAL NOT NULL,
+  qty REAL NOT NULL,
+  filled_qty REAL NOT NULL DEFAULT 0,
+  avg_fill REAL,
+  fee REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,                     -- resting | filled | partial | cancelled | rejected
+  reason TEXT,                              -- starter / add / take_profit / blowout_exit / ...
+  exchange_order_id TEXT,
+  updated_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_bot_orders_position ON bot_orders(position_id, ts);

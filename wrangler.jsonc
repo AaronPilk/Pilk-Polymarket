@@ -12,8 +12,9 @@
     "not_found_handling": "single-page-application"
   },
   // Live game feed: one Durable Object that loops every 5 s while games are live.
-  "durable_objects": { "bindings": [{ "name": "LIVE", "class_name": "LiveFeed" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LiveFeed"] }],
+  // Crypto feed: bitcoin Up or Down windows around the clock, every 5 s.
+  "durable_objects": { "bindings": [{ "name": "LIVE", "class_name": "LiveFeed" }, { "name": "CRYPTO", "class_name": "CryptoFeed" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LiveFeed"] }, { "tag": "v2", "new_sqlite_classes": ["CryptoFeed"] }],
   "d1_databases": [
     { "binding": "DB", "database_name": "pilk-polymarket", "database_id": "43cb2ffb-75a3-4472-9b28-41b2a9429ea0" }
   ],

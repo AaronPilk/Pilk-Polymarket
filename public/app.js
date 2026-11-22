@@ -4,7 +4,7 @@ import { summarize, buildPositions, cashFlows, priceBucket, dayKey } from './ana
 const store = {
   activities: [],
   state: null,     // { snapshot, lastSync, apiConfigured }
-  paper: [],
+  bot: null,      // /api/bot: the bot's own ledger
   range: 'all',
   mode: 'live',    // live | cached | preview
   betFilter: 'All',
@@ -70,7 +70,7 @@ async function load({ quiet = false } = {}) {
     store.state = await s.json();
     store.mode = 'live';
     try { localStorage.setItem('pm-cache', JSON.stringify({ a: store.activities, s: store.state })); } catch {}
-    fetch('/api/paper').then((r) => (r.ok ? r.json() : [])).then((p) => { store.paper = p; renderLab(); }).catch(() => {});
+    refreshBot();
   } catch {
     let cached = null;
     try { cached = JSON.parse(localStorage.getItem('pm-cache') || 'null'); } catch {}
@@ -116,6 +116,7 @@ function renderAll() {
   renderOverview();
   renderBets();
   renderActivity();
+  renderBot();
   renderLab();
   if (firstPaint) {
     firstPaint = false;
@@ -461,6 +462,99 @@ function activityRow(a) {
   return `<div class="row with-badge">${icon}<div class="row-main"><div class="row-title">${esc(title)}</div><div class="row-sub">${esc(sub)}</div></div><div class="row-end"><div class="row-amt ${cls}">${amt}</div><div class="row-meta">${meta.startsWith('<') ? meta : esc(meta)}</div></div></div>`;
 }
 
+// bot ----------------------------------------------------------
+const SIGNAL_LABEL = { favorite_fade: 'Favorite fading', swing: 'Big swing', cheap_spike: 'Cheap spike', late_close: 'Close and late', fair_gap: 'Price vs math' };
+const SIGNAL_ICON = {
+  favorite_fade: ['rgba(255,159,10,.16)', 'var(--orange)', '<path d="M4 7l6 6 3-3 7 7"/><path d="M15 17h5v-5"/>'],
+  swing: ['rgba(10,132,255,.16)', 'var(--blue)', '<path d="M3 13l4-6 4 10 4-8 3 4h3"/>'],
+  cheap_spike: ['rgba(48,209,88,.16)', 'var(--green)', '<path d="M12 20V5"/><path d="M6 11l6-6 6 6"/>'],
+  late_close: ['rgba(255,69,58,.16)', 'var(--red)', '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2"/>'],
+  fair_gap: ['rgba(191,90,242,.16)', 'var(--purple, #bf5af2)', '<path d="M5 9h14M5 15h14"/>'],
+};
+// Closing-line value: how far the price moved our way by game time (positive = we beat it).
+const clvText = (p) => {
+  const v = Math.round((p.close_price - p.avg_entry) * 100);
+  return `line ${v > 0 ? '+' : v < 0 ? MINUS : ''}${Math.abs(v)}¢`;
+};
+const signalBadge = (kind) => {
+  const [bg, fg, path] = SIGNAL_ICON[kind] || SIGNAL_ICON.swing;
+  return `<span class="badge" style="background:${bg};color:${fg}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${path}</svg></span>`;
+};
+
+async function refreshBot() {
+  if (store.mode === 'preview') return;
+  try {
+    const r = await fetch('/api/bot');
+    if (!r.ok) return;
+    store.bot = await r.json();
+    renderBot();
+  } catch {}
+}
+
+function renderBot() {
+  const el = $('#bot-body');
+  if (!el) return;
+  const b = store.bot;
+  if (!b) {
+    el.innerHTML = `<div class="card empty"><h3>${store.mode === 'preview' ? 'Bot data lives in the app' : 'Loading the bot…'}</h3>${store.mode === 'preview' ? "This preview copy can't reach the bot's ledger." : ''}</div>`;
+    return;
+  }
+  const live = b.mode === 'live';
+  const pnl = (b.realized || 0) + (b.unrealized || 0);
+  const losses = (b.record?.closed || 0) - (b.record?.wins || 0);
+  const tiles = [
+    { label: 'Available', value: money(b.available), foot: 'for new bets' },
+    { label: 'At risk', value: money(b.atRisk), foot: `${b.positions.length} open` },
+    { label: 'Record', value: b.record?.closed ? `${b.record.wins}–${losses}` : '–', foot: 'closed positions' },
+    { label: 'Realized', value: money(b.realized || 0, { sign: true }), cls: tone(b.realized || 0), foot: 'after fees' },
+  ];
+  const posRow = (p) => {
+    const plan = [`in at ${cents(p.avg_entry)}`, p.adds ? `${p.adds} add${p.adds > 1 ? 's' : ''}` : null, p.take_profit ? `sells at ${cents(p.take_profit)}` : null].filter(Boolean).join(' · ');
+    return `<div class="row with-badge">${badge(p.side_name || p.title)}<div class="row-main"><div class="row-title">${esc(p.side_name || p.side)}</div><div class="row-sub">${esc(plan)}</div></div><div class="row-end"><div class="row-amt">${cents(p.price)}</div><div class="row-meta ${p.upnl != null ? tone(p.upnl) : ''}">${p.upnl != null ? money(p.upnl, { sign: true }) : '–'}</div></div></div>`;
+  };
+  const histRow = (p) => {
+    const how = p.status === 'settled' ? (p.result ? 'Won' : 'Lost') : 'Sold';
+    return `<div class="row with-badge">${badge(p.side_name || p.title)}<div class="row-main"><div class="row-title">${how} · ${esc(p.side_name || p.side)}</div><div class="row-sub">in at ${cents(p.avg_entry)}${p.adds ? ` · ${p.adds} add${p.adds > 1 ? 's' : ''}` : ''}${p.close_price != null && p.avg_entry != null ? ` · ${clvText(p)}` : ''}</div></div><div class="row-end"><div class="row-amt ${tone(p.pnl || 0)}">${money(p.pnl || 0, { sign: true })}</div><div class="row-meta">${p.closed_at ? ago(new Date(p.closed_at).toISOString()) : ''}</div></div></div>`;
+  };
+  const sigRow = (s) => `<div class="row with-badge">${signalBadge(s.kind)}<div class="row-main"><div class="row-title">${esc(SIGNAL_LABEL[s.kind] || s.kind)}</div><div class="row-sub">${esc(s.detail || s.title || s.slug)}</div></div><div class="row-end"><div class="row-amt">${s.price != null ? cents(s.price) : ''}</div><div class="row-meta">${ago(new Date(s.ts).toISOString())}</div></div></div>`;
+
+  el.innerHTML = `
+    <div class="hero">
+      <div class="hero-label">Bot bankroll <span class="pill ${live ? 'won' : 'open'}" style="vertical-align:2px;margin-left:4px">${live ? 'Live' : 'Paper'}</span></div>
+      <div class="hero-value">${money(b.equity)}</div>
+      <div class="hero-sub"><span><b class="${tone(pnl)}">${money(pnl, { sign: true })}</b> so far</span><span>Started with <b>${money(b.allocation, { cents: false })}</b></span></div>
+    </div>
+    <div class="stats">${tiles.map(statTile).join('')}</div>
+
+    <div class="section">
+      <div class="section-title">Open<small>${b.positions.length ? 'live prices, every 5 s' : ''}</small></div>
+      ${b.positions.length ? `<div class="card">${b.positions.map(posRow).join('')}</div>`
+        : `<div class="card empty"><h3>No open positions</h3>When the bot buys, the position shows up here with its live price and P&L.</div>`}
+    </div>
+
+    <div class="section">
+      <div class="section-title">History<small>${b.history.length ? `${b.history.length} closed` : ''}</small></div>
+      ${b.history.length ? `<div class="card">${b.history.slice(0, 50).map(histRow).join('')}</div>`
+        : `<div class="card empty"><h3>Nothing closed yet</h3>Every closed position lands here with its result, P&L after fees, and whether it beat the closing line.</div>`}
+    </div>
+
+    <div class="section">
+      <div class="section-title">Bot's eye<small>what it's flagging</small></div>
+      ${b.signals.length ? `<div class="card">${b.signals.slice(0, 20).map(sigRow).join('')}</div>`
+        : `<div class="card empty"><h3>Nothing flagged yet</h3>It watches every live game and the bitcoin windows, and flags the moments worth a look.</div>`}
+    </div>
+
+    <div class="section">
+      <div class="section-title">The rules</div>
+      <div class="card steps">
+        <div class="step"><div><b>Never deposits</b>Only you add money. The bot has no way to.</div></div>
+        <div class="step"><div><b>Its own ${money(b.allocation, { cents: false })}</b>It trades its bankroll plus what it wins. Your money and your bets are off limits.</div></div>
+        <div class="step"><div><b>Paper until you say go</b>Live trading stays off until you switch it on and Polymarket approves API trading.</div></div>
+        <div class="step"><div><b>Starting limits</b>About $10 per game, two games at once, no adds under 10¢, a take-profit waiting from the first buy, and a stop for the day after a $10 loss. Yours to change.</div></div>
+      </div>
+    </div>`;
+}
+
 // lab ----------------------------------------------------------
 function renderLab() {
   const el = $('#lab-body');
@@ -468,33 +562,18 @@ function renderLab() {
   const live = store.mode !== 'preview';
   const configured = !!st.apiConfigured;
   const last = st.lastSync;
-  const paper = store.paper || [];
-  const graded = paper.filter((p) => p.status === 'won' || p.status === 'lost');
-  const paperPnl = graded.reduce((s, p) => s + (p.pnl || 0), 0);
   el.innerHTML = `
     <div class="card">
       <div class="row"><div class="row-main"><div class="row-title">Polymarket API</div><div class="row-sub">${!live ? 'Preview copy' : configured ? 'Key saved in Cloudflare' : 'No key yet'}</div></div><div class="row-end"><span class="pill ${configured && live ? 'won' : 'open'}">${configured && live ? 'Connected' : 'Not connected'}</span></div></div>
       <div class="row"><div class="row-main"><div class="row-title">Last sync</div><div class="row-sub">${last ? `${last.ok ? 'OK' : 'Failed'}${last.added ? ` · ${last.added} new` : ''}${last.msg && !last.ok ? ` · ${esc(last.msg).slice(0, 80)}` : ''}` : 'Never'}</div></div><div class="row-end dim" style="font-size:15px">${last ? ago(last.t) : '–'}</div></div>
       <div class="row"><div class="row-main"><div class="row-title">Auto sync</div><div class="row-sub">Runs on Cloudflare, phone can stay closed</div></div><div class="row-end dim" style="font-size:15px">Every 15 min</div></div>
-      <div class="row"><div class="row-main"><div class="row-title">Live game feed</div><div class="row-sub">${st.live?.now ? `${st.live.now} live · ` : ''}${Number(st.live?.ticks || 0).toLocaleString()} price ticks · ${Number(st.live?.states || 0).toLocaleString()} game updates · ${Number(st.live?.lines || 0).toLocaleString()} closing lines</div></div><div class="row-end dim" style="font-size:15px">${st.live?.last ? ago(st.live.last) : 'Every 5 s'}</div></div>
+      <div class="row"><div class="row-main"><div class="row-title">Live game feed</div><div class="row-sub">${st.live?.now ? `${st.live.now} live · ${st.live.focus || 0} in focus · ` : 'Waiting for games · '}${Number(st.live?.ticks || 0).toLocaleString()} price ticks</div></div><div class="row-end dim" style="font-size:15px">${st.live?.last ? ago(st.live.last) : 'Every 5 s'}</div></div>
+      <div class="row"><div class="row-main"><div class="row-title">Bot's eye</div><div class="row-sub">${st.live?.lastSignal ? `${esc(SIGNAL_LABEL[st.live.lastSignal.kind] || st.live.lastSignal.kind)} · ${esc(st.live.lastSignal.detail || st.live.lastSignal.title || '')}` : 'Flags favorites fading, big swings, cheap spikes, close finishes'}</div></div><div class="row-end dim" style="font-size:15px">${Number(st.live?.signals || 0).toLocaleString()} flagged</div></div>
+      <div class="row"><div class="row-main"><div class="row-title">Game data</div><div class="row-sub">${Number(st.live?.states || 0).toLocaleString()} score updates · ${Number(st.live?.lines || 0).toLocaleString()} closing lines</div></div><div class="row-end dim" style="font-size:15px">ESPN</div></div>
+      <div class="row"><div class="row-main"><div class="row-title">Crypto windows</div><div class="row-sub">${st.crypto?.btc ? `BTC ${money(st.crypto.btc, { cents: false })} · 5m 15m 1h · ` : 'Bitcoin Up or Down · '}${Number(st.crypto?.ticks || 0).toLocaleString()} ticks</div></div><div class="row-end dim" style="font-size:15px">${st.crypto?.at ? ago(st.crypto.at) : 'Every 5 s'}</div></div>
       <div class="row"><div class="row-main"><div class="row-title">Market recorder</div><div class="row-sub">${st.recorder ? `${st.recorder.games} games tracked · ${Number(st.recorder.totalPoints || 0).toLocaleString()} price points` : 'Starting up'}</div></div><div class="row-end dim" style="font-size:15px">${st.recorder?.last ? ago(st.recorder.last) : '–'}</div></div>
     </div>
-    <div style="margin-top:12px"><button class="btn" id="lab-sync">Sync now</button></div>
-
-    <div class="section">
-      <div class="section-title">Paper trades<small>${graded.length ? `${graded.filter((p) => p.status === 'won').length}–${graded.filter((p) => p.status === 'lost').length} · ${money(paperPnl, { sign: true })}` : ''}</small></div>
-      ${paper.length ? `<div class="card">${paper.slice(0, 50).map((p) => `<div class="row"><div class="row-main"><div class="row-title">${esc(p.title || p.market_slug)}</div><div class="row-sub">${esc(p.strategy || 'manual')} · ${esc(p.side)} @ ${cents(p.price)} · ${money(p.stake)}</div></div><div class="row-end"><span class="pill ${p.status === 'won' ? 'won' : p.status === 'lost' ? 'lost' : 'open'}">${esc(p.status)}</span>${p.pnl != null ? `<div class="row-meta ${tone(p.pnl)}">${money(p.pnl, { sign: true })}</div>` : ''}</div></div>`).join('')}</div>`
-        : `<div class="card empty"><h3>No paper trades yet</h3>When a strategy runs in paper mode, every trade it would have made lands here, then gets graded when the game settles.</div>`}
-    </div>
-
-    <div class="section">
-      <div class="section-title">How the experiment runs</div>
-      <div class="card steps">
-        <div class="step"><div><b>Paper first</b>A strategy watches markets and logs what it would buy, at what price, and why. No orders go out.</div></div>
-        <div class="step"><div><b>Graded on results</b>Each paper trade settles with the real game, so the record is honest, fees included.</div></div>
-        <div class="step"><div><b>Compare to you</b>After a couple of months, line its record up against yours on the Overview tab. Live trading stays off unless you switch it on in your own bot code.</div></div>
-      </div>
-    </div>`;
+    <div style="margin-top:12px"><button class="btn" id="lab-sync">Sync now</button></div>`;
   $('#lab-sync').addEventListener('click', syncNow);
 }
 
@@ -633,6 +712,7 @@ function setupPullToRefresh(view) {
 }
 
 // ---------------------------------------------------------------- tabs + nav
+let currentView = 'overview';
 function setupTabs() {
   const navbar = $('#navbar'), small = $('#small-title');
   let current = 'overview';
@@ -652,6 +732,8 @@ function setupTabs() {
     $$('.tab').forEach((x) => x.classList.toggle('active', x === t));
     v.classList.add('active');
     current = name;
+    currentView = name;
+    if (name === 'bot') refreshBot();
     syncNav();
   });
   $('#sync-btn').addEventListener('click', syncNow);
@@ -674,4 +756,7 @@ $$('.view').forEach(setupPullToRefresh);
 load();
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('/sw.js').catch(() => {});
 // Coming back to the app after a while: refresh quietly.
+// The Bot tab stays live: open positions and flags refresh every 5 seconds while it's on screen.
+setInterval(() => { if (currentView === 'bot' && document.visibilityState === 'visible') refreshBot(); }, 5000);
+
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && store.mode !== 'preview') load({ quiet: true }); });
