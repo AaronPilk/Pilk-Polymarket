@@ -3,6 +3,7 @@
   "name": "pilk-polymarket",
   "main": "src/index.ts",
   "compatibility_date": "2026-11-01",
+  "workers_dev": true,
   "observability": { "enabled": true },
   "assets": {
     "directory": "./public",
