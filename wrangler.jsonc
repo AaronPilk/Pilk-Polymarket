@@ -14,8 +14,8 @@
   "d1_databases": [
     { "binding": "DB", "database_name": "pilk-polymarket", "database_id": "43cb2ffb-75a3-4472-9b28-41b2a9429ea0" }
   ],
-  // Pull new trades every 15 minutes.
-  "triggers": { "crons": ["*/15 * * * *"] }
+  // Every minute: record live game prices. Every 15 minutes: sync trades and settle games.
+  "triggers": { "crons": ["* * * * *"] }
   // Secrets (set with `npx wrangler secret put NAME`, never in this file):
   //   POLYMARKET_KEY_ID, POLYMARKET_SECRET_KEY, DASH_PASSWORD, SESSION_SECRET
 }

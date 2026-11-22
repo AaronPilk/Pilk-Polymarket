@@ -101,6 +101,70 @@ function normalizeTrade(a: any, type: string): Row {
   });
 }
 
+// ---- Fills: the public API returns one TRADE per fill. An order that fills in pieces
+// shows up as several trades. We store fills and roll them up into one row per order,
+// which is how the website shows them.
+
+export interface Fill {
+  id: string; orderId: string; t: string; mkt: string; action: 'bought' | 'sold';
+  title?: string; sub?: string; evSlug?: string;
+  shares: number; price: number; pnl: number | null; feeCum: number | null;
+}
+
+export function isApiFill(a: any): boolean {
+  return !!(a?.trade && (a.trade.aggressorExecution || a.trade.passiveExecution));
+}
+
+export function parseFill(a: any): Fill | null {
+  const x = a.trade;
+  if (!x) return null;
+  const exec = x.isAggressor === false ? x.passiveExecution : (x.aggressorExecution || x.passiveExecution);
+  const order = exec?.order;
+  if (!order?.id) return null;
+  const intent = String(order.intent || '');
+  const isShort = intent.endsWith('SHORT');
+  const isBuy = intent.startsWith('ORDER_INTENT_BUY') || (!intent && String(order.action || '').endsWith('BUY'));
+  const pxLong = n(exec.lastPx) ?? n(x.price);
+  const shares = n(exec.lastShares) ?? n(x.qtyDecimal ?? x.qty);
+  if (pxLong == null || shares == null) return null;
+  const meta = order.marketMetadata || x.marketMetadata || {};
+  const longTeam = meta.team?.safeName || meta.team?.name || meta.outcome;
+  return {
+    id: `fill_${x.id}`, orderId: order.id, t: order.insertTime || x.createTime || x.updateTime,
+    mkt: order.marketSlug || meta.slug, action: isBuy ? 'bought' : 'sold',
+    title: isShort ? otherSide(meta.title, longTeam) : longTeam, sub: meta.title, evSlug: meta.eventSlug,
+    shares, price: isShort ? 1 - pxLong : pxLong, pnl: n(x.realizedPnl), feeCum: n(order.commissionNotionalTotalCollected),
+  };
+}
+
+// "LSU vs. Tennessee" with LSU as the long side -> "Tennessee".
+function otherSide(gameTitle: string | undefined, longTeam: string | undefined): string | undefined {
+  if (!gameTitle) return longTeam ? `Against ${longTeam}` : undefined;
+  const parts = gameTitle.split(/\s+vs\.?\s+/i);
+  if (parts.length !== 2) return gameTitle;
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const l = norm(longTeam || '');
+  const pick = parts.find((p) => !l || (!norm(p).includes(l) && !l.includes(norm(p))));
+  return pick || parts[1];
+}
+
+export function aggregateOrder(fills: Fill[]): Row | null {
+  if (!fills.length) return null;
+  const f0 = fills[0];
+  const qty = fills.reduce((s, f) => s + f.shares, 0);
+  const notional = fills.reduce((s, f) => s + f.shares * f.price, 0);
+  const fees = fills.map((f) => f.feeCum).filter((v): v is number => v != null);
+  const fee = fees.length ? Math.max(...fees) : null;
+  const pnls = fills.map((f) => f.pnl).filter((v): v is number => v != null);
+  const sold = f0.action === 'sold';
+  return clean({
+    id: `ord_${f0.orderId}`, type: 'TRADE', t: fills.map((f) => f.t).sort()[0], action: f0.action,
+    title: f0.title, sub: f0.sub, evSlug: f0.evSlug, mkt: f0.mkt,
+    price: qty ? notional / qty : null, qty, cost: sold ? notional - (fee || 0) : notional + (fee || 0),
+    fee, pnl: sold && pnls.length ? pnls.reduce((s, v) => s + v, 0) : null, order: f0.orderId,
+  });
+}
+
 function normalizeResolution(a: any, type: string): Row {
   const x = a.positionResolution, m = x.market || {};
   const before = x.beforePosition || {}, after = x.afterPosition || {};
@@ -114,12 +178,18 @@ function normalizeResolution(a: any, type: string): Row {
   const id = a.id || (x.id ? `pos_${x.id}` : `pos_${slug}_${Date.parse(t)}`);
   return clean({
     id, type, t, action: x.action || (pnl == null ? undefined : pnl > 0 ? 'won' : 'lost'),
-    title: x.title || meta.outcome || meta.title, sub: x.subtitle || meta.title,
+    title: x.title || resolutionTitle(x, meta), sub: x.subtitle || meta.title,
     ev: x.eventMetadata?.title, evSlug: x.eventMetadata?.slug || meta.eventSlug, mkt: slug,
     cat: m.category, smt: m.sportsMarketType, sub2: m.eventSubcategory, gameStart: m.gameStartTime,
     entry: n(x.entryPrice), qty: n(x.qtyDecimal ?? x.qty ?? before.netPositionDecimal), basis,
     settle: n(x.settlementPrice), payout, pnl, color: x.color?.dark,
   });
+}
+
+function resolutionTitle(x: any, meta: any): string | undefined {
+  const longTeam = meta.team?.safeName || meta.team?.name || meta.outcome;
+  const side = String(x.side || '');
+  return /SHORT|_NO$/.test(side) ? otherSide(meta.title, longTeam) : longTeam;
 }
 
 function normalizeBalance(a: any, type: string): Row {

@@ -1,4 +1,5 @@
-import { normalize, pm, type PmEnv, type Row } from './polymarket';
+import { aggregateOrder, isApiFill, normalize, parseFill, pm, type Fill, type PmEnv, type Row } from './polymarket';
+import { recordMarkets, settleMarkets } from './recorder';
 
 interface Env extends PmEnv {
   DB: D1Database;
@@ -49,15 +50,26 @@ export default {
     return res;
   },
 
-  async scheduled(_evt: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(sync(env).catch((e) => logSync(env, false, 0, String(e?.message || e))));
+  // Cron runs every minute. The recorder runs every time (it only writes when a live or
+  // soon-to-start game's price moved). Account sync and settlement run every 15 minutes.
+  async scheduled(evt: ScheduledController, env: Env, ctx: ExecutionContext) {
+    const now = new Date(evt.scheduledTime);
+    const fullTick = now.getUTCMinutes() % 15 === 0;
+    ctx.waitUntil((async () => {
+      try { await recordMarkets(env, now, fullTick); }
+      catch (e: any) { if (fullTick) await logSync(env, false, 0, `recorder: ${e?.message || e}`); }
+      if (!fullTick) return;
+      try { await settleMarkets(env, now); }
+      catch (e: any) { await logSync(env, false, 0, `settle: ${e?.message || e}`); }
+      await sync(env).catch((e) => logSync(env, false, 0, String(e?.message || e)));
+    })());
   },
 };
 
 // ---------- data
 
 async function listActivities(env: Env) {
-  const { results } = await env.DB.prepare(`SELECT ${COLS.join(',')} FROM activities ORDER BY t DESC`).all();
+  const { results } = await env.DB.prepare(`SELECT ${COLS.join(',')} FROM activities WHERE type != 'TRADE_FILL' ORDER BY t DESC`).all();
   return results.map((r: any) => {
     const o: Record<string, unknown> = {};
     for (const c of COLS) if (r[c] !== null && r[c] !== undefined && r[c] !== '') o[camel(c)] = r[c];
@@ -68,7 +80,11 @@ async function listActivities(env: Env) {
 async function state(env: Env) {
   const snap = await env.DB.prepare('SELECT * FROM snapshots ORDER BY t DESC LIMIT 1').first<any>();
   const last = await env.DB.prepare('SELECT * FROM sync_log ORDER BY t DESC LIMIT 1').first<any>();
+  const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+  const rec = await env.DB.prepare('SELECT (SELECT COUNT(*) FROM markets WHERE game_start > ?) AS games, (SELECT COUNT(*) FROM prices WHERE t > ?) AS points, (SELECT COUNT(*) FROM prices) AS total, (SELECT MAX(t) FROM prices) AS last')
+    .bind(since, since).first<any>().catch(() => null);
   return {
+    recorder: rec ? { games: rec.games, points24h: rec.points, totalPoints: rec.total, last: rec.last } : null,
     snapshot: snap ? { t: snap.t, cash: snap.cash, positions: snap.positions, portfolio: snap.portfolio, reserved: snap.reserved } : null,
     lastSync: last ? { t: last.t, ok: !!last.ok, added: last.added, msg: last.msg } : null,
     apiConfigured: !!(env.POLYMARKET_KEY_ID && env.POLYMARKET_SECRET_KEY),
@@ -91,25 +107,47 @@ async function upsert(env: Env, rows: Array<Row & { raw?: string }>) {
 
 // Pull newest-first until a page brings nothing new. Pending deposits/withdrawals
 // get re-upserted so their status flips to COMPLETED on their own.
+// Trades arrive one row per fill; fills go to their own table and are rolled up
+// into one activity row per order (id ord_<orderId>).
 async function sync(env: Env) {
   if (!env.POLYMARKET_KEY_ID || !env.POLYMARKET_SECRET_KEY) throw new Error('Polymarket API key not configured');
   const known = new Set(
     (await env.DB.prepare('SELECT id FROM activities').all<{ id: string }>()).results.map((r) => r.id),
   );
+  const knownFills = new Set(
+    (await env.DB.prepare('SELECT id FROM fills').all<{ id: string }>()).results.map((r) => r.id),
+  );
+  const touchedOrders = new Set<string>();
   let cursor: string | undefined, added = 0, pages = 0, skipped = 0;
-  while (pages++ < 40) {
+  while (pages++ < 60) {
     const q = new URLSearchParams({ limit: '100' });
     if (cursor) q.set('cursor', cursor);
     const page = await pm<any>(env, 'GET', '/v1/portfolio/activities', q);
-    const all = (page.activities || []).map((a: any) => ({ ...normalize(a), raw: JSON.stringify(a) }));
-    const rows = all.filter((r: Row) => r.id && r.t);
-    skipped += all.length - rows.length;
+    const acts: any[] = page.activities || [];
+
+    const fillActs = acts.filter(isApiFill);
+    const fills = fillActs.map((a) => ({ f: parseFill(a), raw: JSON.stringify(a) })).filter((x): x is { f: Fill; raw: string } => !!x.f);
+    skipped += fillActs.length - fills.length;
+    const freshFills = fills.filter((x) => !knownFills.has(x.f.id));
+    if (freshFills.length) {
+      const stmt = env.DB.prepare('INSERT OR IGNORE INTO fills (id, order_id, t, mkt, raw) VALUES (?,?,?,?,?)');
+      for (let i = 0; i < freshFills.length; i += 50) {
+        await env.DB.batch(freshFills.slice(i, i + 50).map((x) => stmt.bind(x.f.id, x.f.orderId, x.f.t, x.f.mkt, x.raw)));
+      }
+      for (const x of freshFills) { touchedOrders.add(x.f.orderId); knownFills.add(x.f.id); }
+    }
+
+    const others = acts.filter((a) => !isApiFill(a)).map((a) => ({ ...normalize(a), raw: JSON.stringify(a) }));
+    const rows = others.filter((r: Row) => r.id && r.t);
+    skipped += others.length - rows.length;
     const fresh = rows.filter((r: Row) => !known.has(r.id));
     added += fresh.length;
     await upsert(env, rows);
-    if ((known.size && !fresh.length) || page.eof || !page.nextCursor) break;
+
+    if ((known.size && !fresh.length && !freshFills.length) || page.eof || !page.nextCursor) break;
     cursor = page.nextCursor;
   }
+  added += await rollUpOrders(env, touchedOrders);
 
   try {
     const b = await pm<any>(env, 'GET', '/v1/account/balances');
@@ -127,6 +165,28 @@ async function sync(env: Env) {
   }
   await logSync(env, true, added, skipped ? `${skipped} activities had no timestamp and were skipped` : null);
   return { ok: true, added, skipped };
+}
+
+async function rollUpOrders(env: Env, orderIds: Set<string>) {
+  let added = 0;
+  for (const orderId of orderIds) {
+    const { results } = await env.DB.prepare('SELECT raw FROM fills WHERE order_id = ?').bind(orderId).all<{ raw: string }>();
+    const fills = results.map((r) => parseFill(JSON.parse(r.raw))).filter((f): f is Fill => !!f);
+    const row = aggregateOrder(fills);
+    if (!row) continue;
+    // Orders from before the API sync existed are already stored (from the website history)
+    // under their own id. Same market, same timestamp, same direction = same order.
+    const dup = await env.DB.prepare("SELECT 1 FROM activities WHERE type IN ('TRADE','TRADE_FILL') AND id NOT LIKE 'ord_%' AND mkt = ? AND t = ? AND action = ? LIMIT 1")
+      .bind(row.mkt ?? null, row.t, row.action ?? null).first();
+    if (dup) continue;
+    const exists = await env.DB.prepare('SELECT 1 FROM activities WHERE id = ?').bind(row.id).first();
+    const placeholders = COLS.map(() => '?').join(',');
+    const updates = COLS.filter((c) => c !== 'id').map((c) => `${c}=excluded.${c}`).join(',');
+    await env.DB.prepare(`INSERT INTO activities (${COLS.join(',')}) VALUES (${placeholders}) ON CONFLICT(id) DO UPDATE SET ${updates}`)
+      .bind(...COLS.map((c) => (row as any)[camel(c)] ?? null)).run();
+    if (!exists) added++;
+  }
+  return added;
 }
 
 async function logSync(env: Env, ok: boolean, added: number, msg: string | null) {

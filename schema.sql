@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS activities (
   price REAL, entry REAL, qty REAL, cost REAL, basis REAL, fee REAL,
   settle REAL, payout REAL, pnl REAL,
   order_id TEXT, color TEXT,
-  done TEXT, amount REAL, status TEXT, method TEXT
+  done TEXT, amount REAL, status TEXT, method TEXT,
+  raw TEXT                       -- the API payload, kept so parsing can be audited
 );
 CREATE INDEX IF NOT EXISTS idx_activities_t ON activities(t);
 CREATE INDEX IF NOT EXISTS idx_activities_mkt ON activities(mkt);
@@ -41,3 +42,35 @@ CREATE TABLE IF NOT EXISTS paper_trades (
   pnl REAL
 );
 CREATE INDEX IF NOT EXISTS idx_paper_created ON paper_trades(created_at);
+
+-- One row per fill from the public API. Rolled up into one TRADE activity per order.
+CREATE TABLE IF NOT EXISTS fills (
+  id TEXT PRIMARY KEY,
+  order_id TEXT NOT NULL,
+  t TEXT NOT NULL,
+  mkt TEXT,
+  raw TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_id);
+
+-- Market recorder: one row per game market (moneyline), updated as prices move.
+CREATE TABLE IF NOT EXISTS markets (
+  slug TEXT PRIMARY KEY,
+  league TEXT, event_slug TEXT, title TEXT,
+  long_team TEXT, short_team TEXT,
+  game_start TEXT NOT NULL,
+  fee_coef REAL, status TEXT,
+  last_bid REAL, last_ask REAL,     -- latest quote for the long side
+  result INTEGER,                   -- 1 long side won, 0 short side won, NULL unsettled
+  settled_at TEXT, updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_markets_start ON markets(game_start);
+
+-- Price history for the long side. Written only when the quote changes.
+CREATE TABLE IF NOT EXISTS prices (
+  slug TEXT NOT NULL,
+  t TEXT NOT NULL,                  -- minute bucket, ISO
+  bid REAL, ask REAL,
+  live INTEGER,                     -- 1 if the game had started
+  PRIMARY KEY (slug, t)
+);
