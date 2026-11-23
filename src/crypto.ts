@@ -65,6 +65,7 @@ import { Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from '.
 import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
 import { signedHeaders, type PmEnv } from './polymarket';
 import { accountPosition, cancelOrder, getOrder, openOrders, placeOrder, previewOrder, type OrderSpec } from './orders';
+import { SEC_BUFFER, SEC_DDL, SEC_KEEP_DAYS, SEC_SERIES, secInserts, type SecRow } from './seconds';
 
 const GATEWAY = 'https://gateway.polymarket.us';
 const PM_API = 'https://api.polymarket.us';
@@ -331,6 +332,11 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private settledAt = 0;
   private ladderAt = 0;
   private tunedAt = 0;
+  // The per-second record (seconds.ts): rows waiting to be written, the last second taken
+  private secRows: SecRow[] = [];
+  private recSec = 0;
+  private secReady = false;
+  private secPrunedAt = 0;
   private counts: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0, feed_skips: 0, jump_skips: 0, event_skips: 0, fee_skips: 0 };
   private lastAt: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0, feed_skips: 0, jump_skips: 0, event_skips: 0, fee_skips: 0 };
   private flushedAt = 0;
@@ -375,6 +381,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       stmts.push(...this.pendingStmts.splice(0));
       for (let i = 0; i < stmts.length; i += 100) await this.env.DB.batch(stmts.slice(i, i + 100));
       await this.flush(now);
+      await this.flushSeconds(now);
     } catch (e) {
       console.log('crypto feed error', String((e as any)?.message || e));
     } finally {
@@ -614,6 +621,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       bid: num(d.bestBid), ask: num(d.bestAsk), ts: now, src: 'stream', state: d.state || null,
       bidShares: num(d.bidShares), askShares: num(d.askShares),
     });
+    this.secTick(now);
     this.kick(d.marketSlug);
   }
 
@@ -693,6 +701,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     if (c == null) return;
     this.spot = { price: c, ts: now, src: 'stream' };
     this.sample(now, c);
+    this.secTick(now);
     // A jump: the price moved JUMP_Z standard deviations in about 10 seconds. The market reprices
     // faster than the bot can, so entries pause for a moment.
     const sig = this.sigma15(now);
@@ -759,6 +768,48 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     this.lastSec = sec;
     this.spotSec.push([now, price]);
     while (this.spotSec.length && this.spotSec[0][0] < now - 10 * MIN) this.spotSec.shift();
+  }
+
+  // The per-second record (seconds.ts): on the first price or quote of each new second, a copy of
+  // what the bot sees. Recording only; nothing reads it back to trade, and errors are swallowed.
+  private secTick(now: number) {
+    const sec = Math.floor(now / 1000);
+    if (sec <= this.recSec) return;
+    this.recSec = sec;
+    try {
+      const fresh = (x: { price: number; ts: number } | null) => (x && now - x.ts <= SPOT_LIVE ? r2(x.price) : null);
+      const spot = this.spot && this.spot.src === 'stream' && now - this.spot.ts <= SPOT_LIVE ? r2(this.spot.price) : null;
+      const row: SecRow = [sec, spot, fresh(this.feed.cb), fresh(this.feed.gm)];
+      const wins = this.windowsAt(now);
+      for (const s of SEC_SERIES) {
+        const w = wins.find((x) => x.series === s);
+        const q = w ? this.quotes.get(w.slug) : undefined;
+        const ok = !!q && q.src === 'stream' && !!this.pm && now - q.ts <= STREAM_STALE && isOpen(q.state);
+        const f = w ? this.fairFor(w, now, false) : null;
+        row.push(ok ? q!.bid : null, ok ? q!.ask : null, ok ? q!.bidShares : null, ok ? q!.askShares : null, f ? r4(f.fair) : null);
+      }
+      this.secRows.push(row);
+      if (this.secRows.length > SEC_BUFFER) this.secRows.splice(0, this.secRows.length - SEC_BUFFER);
+    } catch {}
+  }
+
+  // Written every loop in a batch of its own, so a failure here can't drop the bot's other writes.
+  // On an error the rows go back in line (up to SEC_BUFFER); once an hour, rows past SEC_KEEP_DAYS go.
+  private async flushSeconds(now: number) {
+    if (!this.secRows.length) return;
+    const rows = this.secRows.splice(0);
+    try {
+      if (!this.secReady) { await this.env.DB.prepare(SEC_DDL).run(); this.secReady = true; }
+      const ins = secInserts(rows).map((s) => this.env.DB.prepare(s.sql).bind(...s.params));
+      for (let i = 0; i < ins.length; i += 50) await this.env.DB.batch(ins.slice(i, i + 50));
+      if (now - this.secPrunedAt >= 3_600_000) {
+        this.secPrunedAt = now;
+        await this.env.DB.prepare('DELETE FROM btc_sec WHERE sec < ?').bind(Math.floor(now / 1000) - SEC_KEEP_DAYS * 86_400).run();
+      }
+    } catch (e) {
+      this.secRows = [...rows, ...this.secRows].slice(-SEC_BUFFER);
+      console.log('second record error', String((e as any)?.message || e));
+    }
   }
 
   // Re-check one market soon: at most every 250 ms, never two checks queued for the same market.
@@ -921,10 +972,11 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       .bind(w.slug, ASSET, w.series, w.start, w.end, k));
   }
 
-  private fairFor(w: Win, now: number): Fair | null {
+  // ensure = false (the per-second record) only reads the strike, never sets the estimate.
+  private fairFor(w: Win, now: number, ensure = true): Fair | null {
     const s = this.spotNow(now);
     if (!s) return null;
-    this.ensureStrike(w, now);
+    if (ensure) this.ensureStrike(w, now);
     const strike = this.strike.get(w.slug);
     const raw = this.sigmaFor(now, w.end);
     if (strike == null || raw == null) return null;

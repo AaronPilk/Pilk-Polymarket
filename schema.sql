@@ -213,6 +213,11 @@ CREATE TABLE IF NOT EXISTS crypto_marks (
   fair REAL, bid REAL, ask REAL, spot REAL, strike REAL, sigma REAL, avg_obs REAL, src TEXT,
   PRIMARY KEY (slug, ts)
 ) WITHOUT ROWID;
+-- The per-second record (src/seconds.ts, Nov 23): one row a second with the bot's index estimate,
+-- Coinbase's and Gemini's raw mids, and each open Up/Down window's Up bid / ask, shares at each and the
+-- math's fair value (5 = 5m, 15 = 15m, 60 = 1h). For replaying rules that act within seconds. Kept 60
+-- days. The bot creates it on its own if missing.
+CREATE TABLE IF NOT EXISTS btc_sec (sec INTEGER PRIMARY KEY, spot REAL, cb REAL, gm REAL, b5 REAL, a5 REAL, bq5 REAL, aq5 REAL, f5 REAL, b15 REAL, a15 REAL, bq15 REAL, aq15 REAL, f15 REAL, b60 REAL, a60 REAL, bq60 REAL, aq60 REAL, f60 REAL);
 -- What the bot has learned: small JSON blobs keyed by name (btc_model: the latest grading).
 CREATE TABLE IF NOT EXISTS brain (k TEXT PRIMARY KEY, v TEXT NOT NULL, at INTEGER NOT NULL);
 -- Everything the bot does with real money, in plain words, for the app: previews, buys, sells,
