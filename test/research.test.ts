@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 const rows = (n: number, groups: number, pnl: (i: number) => number) => Array.from({ length: n }, (_, i) => ({ pnl: pnl(i), cost: 1, group: i % groups }));
 
 test('research board: too few bets is testing, with how many it still needs', () => {
-  const v = judge('crypto_fair_v1', rows(12, 6, () => 0.3), 'btc');
+  const v = judge('crypto_test_v1', rows(12, 6, () => 0.3), 'btc');
   assert.equal(v.status, 'testing');
   assert.match(v.reason, /12 of 30 bets/);
   const g = judge('hoops_value_v1', rows(40, 5, () => 0.3), 'sports');
@@ -16,31 +16,31 @@ test('research board: too few bets is testing, with how many it still needs', ()
 });
 
 test('research board: losing beyond luck retires; a clear winner is promising, then proven with enough bets', () => {
-  const lose = judge('crypto_fair_v1', rows(40, 8, (i) => (i % 2 ? -0.6 : -0.2)), 'btc');
+  const lose = judge('crypto_test_v1', rows(40, 8, (i) => (i % 2 ? -0.6 : -0.2)), 'btc');
   assert.equal(lose.status, 'retired');
   assert.match(lose.reason, /Losing beyond luck/);
   // ahead by one standard error is a streak a no-edge strategy hits by luck: keeps testing at one contract
-  const noisy = judge('crypto_fair_v1', rows(40, 8, (i) => [0.5, -0.2, 0.4, -0.1, 0.45, -0.25, 0.35, -0.15][i % 8]), 'btc');
+  const noisy = judge('crypto_test_v1', rows(40, 8, (i) => [0.5, -0.2, 0.4, -0.1, 0.45, -0.25, 0.35, -0.15][i % 8]), 'btc');
   assert.ok(noisy.t! >= 1 && noisy.t! < 1.64, `t ${noisy.t}`);
   assert.equal(noisy.status, 'testing');
   assert.match(noisy.reason, /No clear answer/);
   // ahead even in its worst case (mean - 1.64 SE above zero): promising, normal size
-  const ahead = judge('crypto_fair_v1', rows(40, 8, (i) => [0.62, -0.08, 0.52, 0.02, 0.57, -0.13, 0.47, -0.03][i % 8]), 'btc');
+  const ahead = judge('crypto_test_v1', rows(40, 8, (i) => [0.62, -0.08, 0.52, 0.02, 0.57, -0.13, 0.47, -0.03][i % 8]), 'btc');
   assert.ok(ahead.t! >= 1.64, `t ${ahead.t}`);
   assert.equal(ahead.status, 'promising');
   assert.match(ahead.reason, /worst case \+/);
   // ahead clearly, but under 200 bets: still promising, not proven
-  const clear = judge('crypto_fair_v1', rows(60, 10, (i) => 0.2 + ((i % 10) - 4.5) * 0.02), 'btc');
+  const clear = judge('crypto_test_v1', rows(60, 10, (i) => 0.2 + ((i % 10) - 4.5) * 0.02), 'btc');
   assert.ok(clear.t! >= 2);
   assert.equal(clear.status, 'promising');
-  const proven = judge('crypto_fair_v1', rows(220, 20, (i) => 0.2 + ((i % 20) - 9.5) * 0.02), 'btc');
+  const proven = judge('crypto_test_v1', rows(220, 20, (i) => 0.2 + ((i % 20) - 9.5) * 0.02), 'btc');
   assert.equal(proven.status, 'proven');
   // even money, no clear answer: stays testing (one contract a bet)
-  const flat = judge('crypto_fair_v1', rows(40, 8, (i) => (i % 2 ? 0.5 : -0.5)), 'btc');
+  const flat = judge('crypto_test_v1', rows(40, 8, (i) => (i % 2 ? 0.5 : -0.5)), 'btc');
   assert.equal(flat.status, 'testing');
   assert.match(flat.reason, /No clear answer/);
   // ...but still nothing after three times the bets it needs: retired, fees for no edge
-  const stale = judge('crypto_fair_v1', rows(95, 12, (i) => (i % 2 ? 0.5 : -0.5)), 'btc');
+  const stale = judge('crypto_test_v1', rows(95, 12, (i) => (i % 2 ? 0.5 : -0.5)), 'btc');
   assert.equal(stale.status, 'retired');
   assert.match(stale.reason, /Nothing to show after 95 bets/);
 });
@@ -59,8 +59,15 @@ test('research board: ideas the evidence contradicts stay retired; top 3 ranks p
   assert.equal(b.strategies.e.status, 'testing');   // no bets yet
   assert.deepEqual(b.top, ['a', 'b', 'c']);
   assert.equal(statusOf(b, 'd'), 'retired');
-  assert.equal(statusOf(null, 'crypto_fair_v1'), 'testing');
+  assert.equal(statusOf(null, 'crypto_test_v1'), 'testing');
   assert.equal(statusOf(null, 'crypto_late_v1'), 'retired');
+  // Nov 23: price vs math and its cheap-side cousin retired on a 30-day replay, whatever their live record says
+  for (const id of ['crypto_fair_v1', 'crypto_hold_v1', 'crypto_cheap_v1']) {
+    assert.match(RETIRED[id], /Replayed on 30 days|replayed bets/);
+    assert.equal(judge(id, rows(130, 20, (i) => (i % 3 ? -0.3 : 0.9)), 'btc').status, 'retired');
+    assert.equal(statusOf(null, id), 'retired');
+  }
+  assert.equal(statusOf(null, 'crypto_fair_strict'), 'testing');   // the 10¢+ cut wasn't a loser: still testing
 });
 
 test('research board: bets are judged on fees at full size, not the cent-rounded fee', async () => {
@@ -157,7 +164,7 @@ test('quick score: the move toward each bet a minute after it, from the 30-secon
   assert.equal(quickScore([{ move: 0.02, hr: 1 }, { move: 0.01, hr: 2 }]).t, null);   // under 3 hours: no t yet
   assert.deepEqual(quickScore([]), { n: 0, cents: null, t: null });
   // On the board next to the verdict, which still goes by money
-  const b = board(new Map(), ['crypto_fair_v1'], 'btc', 0, new Map([['crypto_fair_v1', q]]));
-  assert.deepEqual(b.strategies.crypto_fair_v1.quick, q);
-  assert.equal(b.strategies.crypto_fair_v1.status, 'testing');
+  const b = board(new Map(), ['crypto_test_v1'], 'btc', 0, new Map([['crypto_test_v1', q]]));
+  assert.deepEqual(b.strategies.crypto_test_v1.quick, q);
+  assert.equal(b.strategies.crypto_test_v1.status, 'testing');
 });

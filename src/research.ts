@@ -33,6 +33,10 @@ export const RETIRED: Record<string, string> = {
   crypto_late_v1: 'Only bets the last two minutes, where the market beats the math: bets with under 4 minutes left lost $176 on Nov 22.',
   crypto_fav_late: 'Replayed on 30 days of Polymarket prices (2,215 bets): the 95–98¢ favorite with 2 minutes left won 96.9% of the time at 96.8¢, break-even before fees and a small loss after. No edge.',
   crypto_fav_last: 'Replayed on 30 days of Polymarket prices (1,557 bets): with 1 minute left the 95–98¢ favorite won 96.0% at 96.9¢, −1.2¢ a contract after fees. Favorites flip more often than their price says in the last minute.',
+  // Nov 23, scripts/pvm_replay.py on 30 days of Polymarket prices (12,089 windows).
+  crypto_fair_v1: 'Replayed on 30 days of Polymarket prices (2,454 bets): where the math beat the price by 5¢ or more, those bets won 36% at 37¢, −2.6¢ a contract after fees (t −2.9). The math said 46%; the market said 36%, and the market was right.',
+  crypto_hold_v1: 'Same entries as price vs math, held to the result: −2.6¢ a contract over 2,454 replayed bets on 30 days of Polymarket prices (t −2.9). The market priced these windows right; the math was about 9 points too confident.',
+  crypto_cheap_v1: 'Replayed on 30 days of Polymarket prices (1,192 bets): the cheap side at 5–20¢ with a sell at 2× lost 5.8¢ a contract, and held to the result it was flat (−0.7¢). No edge after fees.',
 };
 
 // The closed bets a strategy is judged on, with fees priced at full size. Polymarket rounds each
