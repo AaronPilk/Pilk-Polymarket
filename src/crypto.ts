@@ -145,6 +145,11 @@ const feeLive = (p: number) => LIVE_COEF * p * (1 - p);
 //   crypto_fade_v1      the market jumped 8c+ in 15 s while the math barely moved: buy the side
 //                       that got cheap
 //   crypto_ladder_v1    the price ladders (see ladderScan)
+//   crypto_fav_late     the late favorite (Aaron's read, Nov 22): with 90-120 s left, buy the side at
+//                       95-98c and hold it to the result. Late in a window the favorite wins more often
+//                       than its price says (95c+ favorites won 35 of 35 at ~90 s left; the 3c side never
+//                       did), so it bets the market's own lean, not the math
+//   crypto_fav_last     the same with 30-90 s left, to see which timing holds up
 interface CryptoStrategy {
   id: string;
   minEdge: number;            // fair − ask − fee, per contract
@@ -157,6 +162,7 @@ interface CryptoStrategy {
   trigger?: 'lag' | 'fade';
   kelly?: { fraction: number };
   makerExit?: boolean;        // exit with a resting sell at fair + exitAbove (no fee) instead of selling at the bid
+  fav?: boolean;              // the late favorite: no math or blend check, and it sizes only on its own record
 }
 const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_fair_v1', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15, exitAbove: 0.03, tauMin: 75 },
@@ -169,6 +175,8 @@ const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_late_v1', minEdge: 0.06, priceMin: 0.05, priceMax: 0.95, tpBelow: 0, exitAbove: 0.03, tauMin: 20, tauMax: 120, live: true },
   { id: 'crypto_lag_v1', minEdge: 0.04, priceMin: 0.05, priceMax: 0.9, tpBelow: 0, exitAbove: 0.02, tauMin: 45, live: true, trigger: 'lag' },
   { id: 'crypto_fade_v1', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0, exitAbove: 0.02, tauMin: 45, live: true, trigger: 'fade' },
+  { id: 'crypto_fav_late', minEdge: -1, priceMin: 0.95, priceMax: 0.98, tpBelow: 0, exitAbove: null, tauMin: 90, tauMax: 120, fav: true },
+  { id: 'crypto_fav_last', minEdge: -1, priceMin: 0.95, priceMax: 0.98, tpBelow: 0, exitAbove: null, tauMin: 30, tauMax: 90, fav: true },
 ];
 const BY_ID = new Map(CRYPTO_STRATEGIES.map((s) => [s.id, s]));
 export const CRYPTO_IDS = [...CRYPTO_STRATEGIES.map((s) => s.id), 'crypto_ladder_v1'];
@@ -1130,7 +1138,9 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       if (midSide != null && best.fair - midSide > MAX_GAP) { this.seen.delete(key); this.gapSkip(w, best, midSide, f, tau, now); continue; }
       // The fee check: on the blend (what the bot actually believes), the bet must still beat the
       // price after the fee. With the market the sharper one, this is what stops it paying fees for nothing.
-      if (this.sizingProb(best, mid, tau) - best.ask - feePer(best.ask) < BLEND_EDGE) { this.seen.delete(key); this.guardSkip('fee_skips', w, now); continue; }
+      // The late favorite skips it: its bet is the market's own lean late in a window, not the math, and
+      // the 98c ceiling leaves at least 2c a win before a fee of a fraction of a cent.
+      if (!st.fav && this.sizingProb(best, mid, tau) - best.ask - feePer(best.ask) < BLEND_EDGE) { this.seen.delete(key); this.guardSkip('fee_skips', w, now); continue; }
       // On the stream, the price has to still be there 0.6 s later, like a real order landing.
       if (src === 'stream') {
         const s = this.seen.get(key);
@@ -1143,7 +1153,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         const bank = await this.bank(st.id, now);
         if (!dailyStopHit(bank.equity, bank.today, bank.peak)) {
           const stake = stakeFor({
-            fair: this.sizingProb(best, mid, tau), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
+            fair: st.fav ? best.ask : this.sizingProb(best, mid, tau), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
             fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(), recordKelly: this.records.get(st.id)?.f ?? 0,
           });
           let qty = Math.floor(stake / best.ask);
@@ -1159,7 +1169,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
             const pos = await openPosition(this.env.DB, {
               strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side,
               sideName: `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`, ask: best.ask, qty, coef: COEF,
-              reason: `${probe ? 'probe: ' : ''}fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${leftText(tau)}${src === 'stream' ? ', on stream' : ''}`, now, tpBelow: st.tpBelow,
+              reason: `${probe ? 'probe: ' : ''}${st.fav ? `favorite at ${cents(best.ask)}` : `fair ${cents(best.fair)} vs ask ${cents(best.ask)}`}, ${leftText(tau)}${src === 'stream' ? ', on stream' : ''}`, now, tpBelow: st.tpBelow,
               meta: { fair: r4(best.fair), edge: r4(best.edge), mid: midSide == null ? null : r4(midSide), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), record: this.records.get(st.id)?.f ?? 0, probe, feeds: this.feedsNow(now), src, equity: r2(bank.equity), rules: RULES, status },
             });
             pos.mode = 'paper';

@@ -33,6 +33,18 @@ export function groupT(values: number[]): number | null {
   return v > 0 ? m / Math.sqrt(v / values.length) : null;
 }
 
+// The record with one more total loss added, the size of an average bet. A strategy that rarely or never
+// loses (a 97c favorite wins 3c again and again, then loses 97c) shows almost no spread, so its worst case
+// looks safe right up to the loss. Promotion and record sizing judge this version: a strategy has to show
+// it can take one more full loss and still be ahead.
+export function withOneLoss(rows: ReadyRow[]): ReadyRow[] {
+  let n = 0, c = 0;
+  for (const r of rows) if ((r.cost || 0) > 0) { n++; c += r.cost || 0; }
+  if (!n) return rows;
+  const avg = c / n;
+  return [...rows, { pnl: -avg, cost: avg, group: '__one_more_loss__' }];
+}
+
 // The return on each dollar bet across a set of trades, and how sure it is. mean = P&L over
 // dollars bet; se treats each group (an hour, a game) as one draw, since trades in a group rise and
 // fall together; v is the spread of single-trade returns (what Kelly divides by).

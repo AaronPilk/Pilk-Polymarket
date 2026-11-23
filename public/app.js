@@ -507,6 +507,8 @@ const STRATEGY_LABEL = {
   crypto_lag_v1: 'Bitcoin · beat the lag after a jump',
   crypto_fade_v1: 'Bitcoin · fade jumps the math doesn’t back',
   crypto_ladder_v1: 'Bitcoin · price ladders',
+  crypto_fav_late: 'Bitcoin · late favorite, 90–120 s left',
+  crypto_fav_last: 'Bitcoin · late favorite, 30–90 s left',
   hoops_trailer_v1: 'Basketball · your style',
   hoops_trailer_h1: 'Basketball · your style, first half',
   hoops_trailer_deep: 'Basketball · your style, deeper dips',

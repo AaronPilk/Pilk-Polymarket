@@ -25,8 +25,8 @@ test('research board: losing beyond luck retires; a clear winner is promising, t
   assert.equal(noisy.status, 'testing');
   assert.match(noisy.reason, /No clear answer/);
   // ahead even in its worst case (mean - 1.64 SE above zero): promising, normal size
-  const ahead = judge('crypto_fair_v1', rows(40, 8, (i) => [0.59, -0.11, 0.49, -0.01, 0.54, -0.16, 0.44, -0.06][i % 8]), 'btc');
-  assert.ok(ahead.t! >= 1.64 && ahead.t! < 2, `t ${ahead.t}`);
+  const ahead = judge('crypto_fair_v1', rows(40, 8, (i) => [0.62, -0.08, 0.52, 0.02, 0.57, -0.13, 0.47, -0.03][i % 8]), 'btc');
+  assert.ok(ahead.t! >= 1.64, `t ${ahead.t}`);
   assert.equal(ahead.status, 'promising');
   assert.match(ahead.reason, /worst case \+/);
   // ahead clearly, but under 200 bets: still promising, not proven
@@ -105,4 +105,15 @@ test('research board: bets are judged on fees at full size, not the cent-rounded
   close(by.crypto_cheap_v1.pnl, 0.96 - fee(0.04));
   close(by.crypto_cheap_v1.cost, 0.04 + fee(0.04));
   assert.equal(by.crypto_fair_v1.hr, 5);
+});
+
+test('research board: a strategy that has never lost has to absorb one more full loss before it sizes up', () => {
+  // 97.5c favorites: about +2.6c a win, no loss yet
+  const fav = (n: number, groups: number) => Array.from({ length: n }, (_, i) => ({ pnl: 0.025 + (i % 3) * 0.001, cost: 0.975, group: i % groups }));
+  const early = judge('crypto_fav_late', fav(40, 8), 'btc');
+  assert.ok(early.t! > 10, `raw t ${early.t}`);   // on its own record it looks like a sure thing...
+  assert.equal(early.status, 'testing');           // ...but one 97c loss would wipe out all 40 wins
+  const later = judge('crypto_fav_late', fav(160, 32), 'btc');
+  assert.equal(later.status, 'promising');
+  assert.match(later.reason, /one more full loss/);
 });

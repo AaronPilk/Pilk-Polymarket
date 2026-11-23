@@ -11,7 +11,7 @@
 // Limits of v1, on purpose: no fouls, timeouts or injuries; in football only who has the ball
 // (worth about a point and a half), not down, distance or field position.
 
-import { returnStats, type ReadyRow } from './ready';
+import { returnStats, withOneLoss, type ReadyRow } from './ready';
 
 // Standard normal CDF (Abramowitz-Stegun 7.1.26, error < 1.5e-7). Same as cryptomath.ts.
 export function normCdf(x: number): number {
@@ -209,15 +209,18 @@ export function edgeFloor(st: { veto: (progress: number) => number; leaderEdge?:
 // lower anyway).
 export const RECORD_MIN = { trades: 50, groups: 10 };
 export function recordKelly(rows: ReadyRow[]) {
-  const r = returnStats(rows);
+  const a = returnStats(rows);
+  // Sized on the record with one more full loss counted (ready.ts withOneLoss); the minimums and the
+  // numbers it reports come from the real record.
+  const r = returnStats(withOneLoss(rows));
   let f = 0;
-  if (r.n >= RECORD_MIN.trades && r.groups >= RECORD_MIN.groups && r.mean != null && r.se != null && r.v != null) {
+  if (a.n >= RECORD_MIN.trades && a.groups >= RECORD_MIN.groups && r.mean != null && r.se != null && r.v != null) {
     const edge = r.mean - r.se;
     const m2 = r.v + r.mean * r.mean;
     f = edge > 0 && m2 > 0 ? Math.min(1, edge / m2) : 0;
   }
   const r4 = (x: number | null) => (x == null ? null : Math.round(x * 10_000) / 10_000);
-  return { f: r4(f) as number, mean: r4(r.mean), se: r4(r.se), t: r.t == null ? null : Math.round(r.t * 100) / 100, n: r.n, hours: r.groups };
+  return { f: r4(f) as number, mean: r4(a.mean), se: r4(a.se), t: a.t == null ? null : Math.round(a.t * 100) / 100, n: a.n, hours: a.groups };
 }
 
 // Stop for the day after losing the ladder's day share of what the account started the day with

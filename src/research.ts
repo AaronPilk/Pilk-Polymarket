@@ -5,15 +5,15 @@
 //              It stops betting.
 //   testing    not enough bets to judge, or no clear answer yet. One contract a bet, so a test costs
 //              pennies while it gathers data.
-//   promising  ahead even in its worst case (mean minus 1.64 standard errors above zero), the mirror of
-//              the retire rule. Bets its normal size. The board looks every 5 minutes, and a bar as low
+//   promising  ahead even in its worst case (mean minus 1.64 standard errors above zero, on the record
+//              with one more full loss counted), the mirror of the retire rule. Bets its normal size. The board looks every 5 minutes, and a bar as low
 //              as one standard error is one a strategy with no edge clears by luck often enough to bet
 //              real money on a streak; at 1.64 that mostly stops.
 //   proven     ahead by two standard errors over enough bets (the readiness card's bar). Normal size,
 //              and it can size up on its own record.
 // The top three are the proven and promising strategies with the best worst case (mean minus one
 // standard error, as a return per dollar bet).
-import { returnStats, type ReadyRow } from './ready';
+import { returnStats, withOneLoss, type ReadyRow } from './ready';
 import { TAKER_COEF } from './fairvalue';
 
 // Positions opened under the rules this board judges carry meta.rules >= RULES. Bump it when the
@@ -59,15 +59,18 @@ const r4 = (x: number | null) => (x == null ? null : Math.round(x * 10_000) / 10
 
 export function judge(id: string, rows: ReadyRow[], book: Book): Verdict {
   const s = returnStats(rows);
+  // Moving up (and the ranking) go on the record with one more full loss counted (ready.ts withOneLoss),
+  // so a strategy that hasn't lost yet can't size up on a streak; retiring goes on the real record.
+  const g = returnStats(withOneLoss(rows));
   const base = {
     n: s.n, groups: s.groups, pnl: Math.round(s.pnl * 100) / 100, cost: Math.round(s.cost * 100) / 100,
     mean: r4(s.mean), se: r4(s.se), t: s.t == null ? null : Math.round(s.t * 100) / 100,
-    low: s.mean != null && s.se != null ? r4(s.mean - s.se) : null,
+    low: g.mean != null && g.se != null ? r4(g.mean - g.se) : null,
   };
   if (RETIRED[id]) return { ...base, status: 'retired', reason: RETIRED[id] };
   const lab = LAB[book], unit = book === 'btc' ? 'hours' : 'games';
   if (s.n < lab.judge || s.groups < lab.groups || s.mean == null || s.se == null || !(s.se > 0)) {
-    const more = s.n < lab.judge ? `${s.n} of ${lab.judge} bets on the new rules` : `${s.groups} of ${lab.groups} ${unit} so far`;
+    const more = s.n < lab.judge ? `${s.n} of ${lab.judge} bets on the new rules` : s.groups < lab.groups ? `${s.groups} of ${lab.groups} ${unit} so far` : 'no spread in its results yet';
     return { ...base, status: 'testing', reason: `Testing with one contract a bet: ${more}.` };
   }
   const t = s.mean / s.se, line = `${pct(s.mean)} a dollar over ${s.n} bets`;
@@ -77,8 +80,9 @@ export function judge(id: string, rows: ReadyRow[], book: Book): Verdict {
   if (s.n >= lab.judge * 3 && t < 0.5) {
     return { ...base, status: 'retired', reason: `Nothing to show after ${s.n} bets: ${pct(s.mean)} a dollar (t ${t.toFixed(1)}). Fees for no edge.` };
   }
-  if (s.n >= lab.proven && t >= 2 && s.pnl > 0) return { ...base, status: 'proven', reason: `Ahead beyond luck: ${line} (t ${t.toFixed(1)}).` };
-  if (s.mean - Z * s.se > 0 && s.pnl > 0) return { ...base, status: 'promising', reason: `Ahead even in its worst case: ${line}, worst case ${pct(s.mean - Z * s.se)}. Bets its normal size.` };
+  const gt = g.mean != null && g.se != null && g.se > 0 ? g.mean / g.se : null;
+  if (s.n >= lab.proven && gt != null && gt >= 2 && s.pnl > 0) return { ...base, status: 'proven', reason: `Ahead beyond luck: ${line} (t ${gt.toFixed(1)} with one more full loss counted).` };
+  if (g.mean != null && g.se != null && g.mean - Z * g.se > 0 && s.pnl > 0) return { ...base, status: 'promising', reason: `Ahead even in its worst case: ${line}, worst case ${pct(g.mean - Z * g.se)} even after one more full loss. Bets its normal size.` };
   return { ...base, status: 'testing', reason: `No clear answer yet: ${line} (t ${t.toFixed(1)}). Still one contract a bet.` };
 }
 
