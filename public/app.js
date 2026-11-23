@@ -886,6 +886,28 @@ function quickLine(q) {
   return ` The minute after: ${q.cents >= 0 ? '+' : '−'}${Math.abs(q.cents).toFixed(1)}¢ a bet over ${q.n}${q.t != null ? ` (t ${q.t.toFixed(1)})` : ''}.`;
 }
 
+// Where things stand, in plain words: the board's verdicts for this bot and how to read the page.
+function standCard(b) {
+  const book = b.book || 'btc', group = BOOK_GROUP[book];
+  const rows = b.lab?.strategies ? Object.entries(b.lab.strategies).filter(([id]) => STRATEGY_LABEL[id] && groupOf(id) === group) : [];
+  const of = (k) => rows.filter(([, v]) => v.status === k).sort((x, y) => (y[1].n || 0) - (x[1].n || 0));
+  const proven = of('proven'), promising = of('promising'), testing = of('testing'), retired = of('retired');
+  const list = (xs, withN) => xs.map(([id, v]) => `${esc(variantOf(id))}${withN ? ` <span class="faint">(${v.n || 0} bet${v.n === 1 ? '' : 's'})</span>` : ''}`).join(' · ');
+  const head = !rows.length ? 'The board hasn’t judged anything yet. First verdicts come within 5 minutes.'
+    : proven.length ? `${proven.length} proven: ${proven.length === 1 ? 'it makes' : 'they make'} money beyond luck.`
+    : promising.length ? `Nothing proven yet. ${promising.length} ${promising.length === 1 ? 'looks' : 'look'} good so far.`
+    : 'Nothing is proven yet. Everything still running is a 1-contract test.';
+  const line = (k, xs, text, withN) => (xs.length ? `<div class="row"><div class="row-main"><div class="row-title"><span class="pill ${STATUS_PILL[k][0]}">${STATUS_PILL[k][1]}</span> ${xs.length}</div><div class="row-sub wrap">${list(xs, withN)}. ${text}</div></div></div>` : '');
+  return `<div class="card stand">
+    <div class="row"><div class="row-main"><div class="row-title">${head}</div></div></div>
+    ${line('proven', proven, 'Ahead beyond luck: these bet full size on paper and are the ones that could get real money. That switch is yours.', true)}
+    ${line('promising', promising, 'Ahead even in the worst case, so they bet normal size on paper. Not proven yet.', true)}
+    ${line('testing', testing, 'One contract a bet until there are enough bets to tell skill from luck.', true)}
+    ${line('retired', retired, 'Stopped: they lost money or showed no edge after fees, and don’t bet anymore.', false)}
+    <div class="row-sub wrap pad">How to read this page: <b>Run</b> counts only bets on the current test rules. <b>All</b> also includes Nov 22, when the bot bet bigger before the fixes, so it looks much worse. Test bets are one contract, so the dollar amounts are small and swing on luck. The labels are the real signal: watch for Promising or Proven.${book === 'btc' ? ' The sell-early card grades exits only: green there means selling early beat holding on those bets, not that the bets made money.' : ''}</div>
+  </div>`;
+}
+
 function researchCard(lab) {
   if (!lab?.strategies) return '<div class="card pad">Every 5 minutes the board judges each strategy on its bets under the new rules: losers retire, winners bet more. First verdicts in a few minutes.</div>';
   const order = { proven: 0, promising: 1, testing: 2, retired: 3 };
@@ -1032,6 +1054,11 @@ function botRest(b) {
 
   return `
     ${showLive ? liveSection(L) : ''}
+
+    <div class="section">
+      <div class="section-title">Where things stand<small>${b.lab?.at ? `board updated ${ago(new Date(b.lab.at).toISOString())}` : 'in plain words'}</small></div>
+      ${standCard(b)}
+    </div>
 
     <div class="section">
       <div class="section-title">Research board<small>judged every 5 minutes on the new rules</small></div>

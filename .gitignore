@@ -11,3 +11,4 @@ brain/
 fav_replay_result.json
 pvm_replay_result.json
 __pycache__/
+strategy_replay_result.json
