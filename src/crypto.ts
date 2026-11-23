@@ -58,7 +58,7 @@
 //               order errors in a row. Every action lands in live_events for the app.
 
 import { DurableObject } from 'cloudflare:workers';
-import { DEFAULT_BLEND, SCORE_POINTS, bandOf, blendProb, eventFor, fairUp, gradeModel, learnOffset, parseWindow, windowEnd, windowSlug, type Band, type Blend, type Mark } from './cryptomath';
+import { DEFAULT_BLEND, SCORE_POINTS, bandOf, blendProb, eventFor, fairUp, gradeModel, judgingBlend, learnOffset, parseWindow, windowEnd, windowSlug, type Band, type Blend, type Mark } from './cryptomath';
 import { RULES, statusOf, type Status, AT_SIZE_SQL } from './research';
 import { dailyStopHit, drawdownScale, recordKelly, riskLimits, stakeFor } from './fairvalue';
 import { Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
@@ -1147,7 +1147,13 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       // price after the fee. With the market the sharper one, this is what stops it paying fees for nothing.
       // The late favorite skips it: its bet is the market's own lean late in a window, not the math, and
       // its price band is the whole rule (each arm's ceiling leaves at least a cent a win after the fee).
-      if (!st.fav && this.sizingProb(best, mid, tau) - best.ask - feePer(best.ask) < BLEND_EDGE) { this.seen.delete(key); this.guardSkip('fee_skips', w, now); continue; }
+      // A paper test bet (1 contract) is judged on judgingBlend: with 4+ minutes left that's the 50/50
+      // start until the board decides. Real money always has to clear the fitted blend.
+      const cost = best.ask + feePer(best.ask);
+      const fitOk = !!st.fav || this.sizingProb(best, mid, tau) - cost >= BLEND_EDGE;
+      const testOk = fitOk || (status === 'testing' && this.probOn(judgingBlend(this.blends, bandOf(tau), true), best, mid) - cost >= BLEND_EDGE);
+      const paperGo = paperFree && testOk, liveGo = liveFree && fitOk;
+      if (!paperGo && !liveGo) { this.seen.delete(key); this.guardSkip('fee_skips', w, now); continue; }
       // On the stream, the price has to still be there 0.6 s later, like a real order landing.
       if (src === 'stream') {
         const s = this.seen.get(key);
@@ -1156,7 +1162,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       }
       this.seen.delete(key);
 
-      if (paperFree) {
+      if (paperGo) {
         const bank = await this.bank(st.id, now);
         if (!dailyStopHit(bank.equity, bank.today, bank.peak)) {
           const stake = stakeFor({
@@ -1177,7 +1183,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
               strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side,
               sideName: `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`, ask: best.ask, qty, coef: COEF,
               reason: `${probe ? 'probe: ' : ''}${st.fav ? `favorite at ${cents(best.ask)}` : `fair ${cents(best.fair)} vs ask ${cents(best.ask)}`}, ${leftText(tau)}${src === 'stream' ? ', on stream' : ''}`, now, tpBelow: st.tpBelow,
-              meta: { fair: r4(best.fair), edge: r4(best.edge), mid: midSide == null ? null : r4(midSide), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), record: this.records.get(st.id)?.f ?? 0, probe, feeds: this.feedsNow(now), src, equity: r2(bank.equity), rules: RULES, status },
+              meta: { fair: r4(best.fair), edge: r4(best.edge), mid: midSide == null ? null : r4(midSide), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), record: this.records.get(st.id)?.f ?? 0, probe, feeds: this.feedsNow(now), src, equity: r2(bank.equity), rules: RULES, status, gate: fitOk ? 'fit' : 'start' },
             });
             pos.mode = 'paper';
             this.open.push(pos);
@@ -1185,7 +1191,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
           }
         }
       }
-      if (liveFree) await this.liveEnter(w, st, best, f, tau, now, mid);
+      if (liveGo) await this.liveEnter(w, st, best, f, tau, now, mid);
     }
   }
 
@@ -1323,8 +1329,10 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     if (!st || st.exitAbove == null || fair == null || tau < (st.tauMax != null ? 8 : 20)) return;
     // Exits judge the bid against the blend too: sell early only when the bid, after its fee, beats what
     // the bot believes holding is worth. Otherwise it rides to the result, which costs no fee.
+    // A test position is judged on the blend it was entered on (judgingBlend), so its exits follow the
+    // same rules as the record the board grades.
     const qMid = q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : null;
-    const up = blendProb(this.blends[bandOf(tau)], fair, qMid ?? fair);
+    const up = blendProb(judgingBlend(this.blends, bandOf(tau), statusOf(this.lab, p.strategy) === 'testing'), fair, qMid ?? fair);
     const fairSide = p.side === 'long' ? up : 1 - up;
     if (st.makerExit) {
       // A resting sell kept at fair + exitAbove (re-priced as fair moves). It fills, with no fee,
@@ -1363,9 +1371,13 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   // The probability bets are sized on: the math and the market's mid weighed on the log-odds scale
   // (cryptomath.ts blendProb). Up is blended, then turned into the side's chance.
   private sizingProb(best: Cand, mid: number | null, tau: number): number {
+    return this.probOn(this.blends[bandOf(tau)], best, mid);
+  }
+
+  private probOn(bl: Blend, best: Cand, mid: number | null): number {
     const fairUpP = best.side === 'long' ? best.fair : 1 - best.fair;
     const midUp = mid ?? (best.side === 'long' ? best.ask : 1 - best.ask);
-    const up = blendProb(this.blends[bandOf(tau)], fairUpP, midUp);
+    const up = blendProb(bl, fairUpP, midUp);
     return best.side === 'long' ? up : 1 - up;
   }
 

@@ -232,6 +232,15 @@ export const BAND_SPLIT = 240;
 export type Band = 'early' | 'late';
 export const bandOf = (tau: number): Band => (tau >= BAND_SPLIT ? 'early' : 'late');
 
+// The blend a bet is judged on. Each band adopts its own fit at 100 windows. A strategy still testing
+// (1-contract paper bets) keeps the 50/50 start with 4+ minutes left, so the early fit can't end a test
+// before the research board reaches a verdict: on Nov 23 that fit's market weight went 0.92 → 0.78 →
+// 0.90 in four hours, and at adoption it shut off every early bet of the strategies leading the board.
+// The board still retires a test that loses. Promoted strategies, sizing and real money use the fit.
+export function judgingBlend(fitted: Record<Band, Blend>, band: Band, testing: boolean): Blend {
+  return testing && band === 'early' ? DEFAULT_BLEND : fitted[band];
+}
+
 export function gradeModel(marks: Mark[], current = 1) {
   const pts = selectCheckpoints(marks);
   const perWindow = new Map<string, number>();

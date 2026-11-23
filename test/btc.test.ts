@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_BLEND, blendProb, eventFor, fitBlend, gradeModel, nextEvent, parseWindow, fairUp, logLoss, learnOffset, selectCheckpoints, windowSlug, type Mark } from '../src/cryptomath.ts';
+import { DEFAULT_BLEND, blendProb, eventFor, fitBlend, gradeModel, judgingBlend, nextEvent, parseWindow, fairUp, logLoss, learnOffset, selectCheckpoints, windowSlug, type Mark } from '../src/cryptomath.ts';
 import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale } from '../src/fairvalue.ts';
 
 test('parseWindow reads series, start and end', () => {
@@ -260,4 +260,19 @@ test('each time-left band learns its own weights: early can trust the math while
   // A band with under 100 windows of its own is not adopted
   const few = gradeModel(marks.filter((m) => m.tau !== 240 || Number(m.slug.slice(-5, -3)) % 3 === 0));
   assert.ok(few.bands.early.windows < 100 && few.bands.early.next === null, `${few.bands.early.windows}`);
+});
+
+// Nov 23: the early band adopted a fit with no math weight (market weight 0.8985), and a 37¢ cheap-side
+// entry the math rated at 45¢ stopped clearing the fee check. Test bets keep the 50/50 start with 4+
+// minutes left; promoted strategies and the last 4 minutes use the fit.
+test('test bets keep the 50/50 start with 4+ minutes left; everything else is judged on the fit', () => {
+  const fitted = { early: { a: 0, b: 0, c: 0.8985 }, late: { a: 0, b: 0.0899, c: 1.0385 } };
+  assert.deepEqual(judgingBlend(fitted, 'early', true), DEFAULT_BLEND);
+  assert.deepEqual(judgingBlend(fitted, 'early', false), fitted.early);
+  assert.deepEqual(judgingBlend(fitted, 'late', true), fitted.late);
+  assert.deepEqual(judgingBlend(fitted, 'late', false), fitted.late);
+  // The entry: Up side at 37¢ (mid 36.5¢), the math says 45¢. Fee at 37¢ is 2.2¢; the bar is 1¢ over cost.
+  const ask = 0.37, cost = ask + 0.095 * ask * (1 - ask), math = 0.45, mid = 0.365;
+  assert.ok(blendProb(judgingBlend(fitted, 'early', true), math, mid) - cost >= 0.01, 'clears on the 50/50 start');
+  assert.ok(blendProb(judgingBlend(fitted, 'early', false), math, mid) - cost < 0.01, 'fails on the fit');
 });
