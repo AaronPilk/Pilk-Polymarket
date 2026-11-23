@@ -150,6 +150,12 @@ const feeLive = (p: number) => LIVE_COEF * p * (1 - p);
 //                       than its price says (95c+ favorites won 35 of 35 at ~90 s left; the 3c side never
 //                       did), so it bets the market's own lean, not the math
 //   crypto_fav_last     the same with 30-90 s left, to see which timing holds up
+//                       Both retired the same night: a replay on 30 days of Polymarket's own prices
+//                       (scripts/fav_replay.py, 12,090 windows) found no edge at 2 minutes and a loss at 1
+//   crypto_fav_98       the one cut that held up in that replay: the side at 98-99c with about 3
+//                       minutes left won 99.5% of 1,893 times at 98.8c (+0.6c a contract after fees, t 3.4),
+//                       and the bot's own quotes show a real seller there. Wins a cent, loses 99c, so the
+//                       board's one-more-loss rule keeps it at one contract for a long time
 interface CryptoStrategy {
   id: string;
   minEdge: number;            // fair − ask − fee, per contract
@@ -177,6 +183,7 @@ const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_fade_v1', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0, exitAbove: 0.02, tauMin: 45, live: true, trigger: 'fade' },
   { id: 'crypto_fav_late', minEdge: -1, priceMin: 0.95, priceMax: 0.98, tpBelow: 0, exitAbove: null, tauMin: 90, tauMax: 120, fav: true },
   { id: 'crypto_fav_last', minEdge: -1, priceMin: 0.95, priceMax: 0.98, tpBelow: 0, exitAbove: null, tauMin: 30, tauMax: 90, fav: true },
+  { id: 'crypto_fav_98', minEdge: -1, priceMin: 0.98, priceMax: 0.99, tpBelow: 0, exitAbove: null, tauMin: 150, tauMax: 210, fav: true },
 ];
 const BY_ID = new Map(CRYPTO_STRATEGIES.map((s) => [s.id, s]));
 export const CRYPTO_IDS = [...CRYPTO_STRATEGIES.map((s) => s.id), 'crypto_ladder_v1'];
@@ -1139,7 +1146,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       // The fee check: on the blend (what the bot actually believes), the bet must still beat the
       // price after the fee. With the market the sharper one, this is what stops it paying fees for nothing.
       // The late favorite skips it: its bet is the market's own lean late in a window, not the math, and
-      // the 98c ceiling leaves at least 2c a win before a fee of a fraction of a cent.
+      // its price band is the whole rule (each arm's ceiling leaves at least a cent a win after the fee).
       if (!st.fav && this.sizingProb(best, mid, tau) - best.ask - feePer(best.ask) < BLEND_EDGE) { this.seen.delete(key); this.guardSkip('fee_skips', w, now); continue; }
       // On the stream, the price has to still be there 0.6 s later, like a real order landing.
       if (src === 'stream') {

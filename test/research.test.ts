@@ -110,10 +110,10 @@ test('research board: bets are judged on fees at full size, not the cent-rounded
 test('research board: a strategy that has never lost has to absorb one more full loss before it sizes up', () => {
   // 97.5c favorites: about +2.6c a win, no loss yet
   const fav = (n: number, groups: number) => Array.from({ length: n }, (_, i) => ({ pnl: 0.025 + (i % 3) * 0.001, cost: 0.975, group: i % groups }));
-  const early = judge('crypto_fav_late', fav(40, 8), 'btc');
+  const early = judge('crypto_fav_98', fav(40, 8), 'btc');
   assert.ok(early.t! > 10, `raw t ${early.t}`);   // on its own record it looks like a sure thing...
   assert.equal(early.status, 'testing');           // ...but one 97c loss would wipe out all 40 wins
-  const later = judge('crypto_fav_late', fav(160, 32), 'btc');
+  const later = judge('crypto_fav_98', fav(160, 32), 'btc');
   assert.equal(later.status, 'promising');
   assert.match(later.reason, /one more full loss/);
 });

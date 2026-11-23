@@ -31,6 +31,8 @@ const Z = 1.64;   // best case = mean + 1.64 standard errors, worst case = mean 
 export const RETIRED: Record<string, string> = {
   crypto_fade_v1: 'Bets against price moves the math doesn’t back, but the market leads the math: 7 of 22 up, −23% a dollar on Nov 22.',
   crypto_late_v1: 'Only bets the last two minutes, where the market beats the math: bets with under 4 minutes left lost $176 on Nov 22.',
+  crypto_fav_late: 'Replayed on 30 days of Polymarket prices (2,215 bets): the 95–98¢ favorite with 2 minutes left won 96.9% of the time at 96.8¢, break-even before fees and a small loss after. No edge.',
+  crypto_fav_last: 'Replayed on 30 days of Polymarket prices (1,557 bets): with 1 minute left the 95–98¢ favorite won 96.0% at 96.9¢, −1.2¢ a contract after fees. Favorites flip more often than their price says in the last minute.',
 };
 
 // The closed bets a strategy is judged on, with fees priced at full size. Polymarket rounds each
