@@ -245,7 +245,12 @@ const isOpen = (state: string | null) => !state || /OPEN/.test(state);
 // the fetch also closed the socket itself 8 s later: every stream (Polymarket, Coinbase, Gemini and
 // the three books) reconnected every 10 s and the bot heard no prices for 1-2 s each time (found
 // Nov 23 with the per-second record). The timer is cleared once the upgrade answers.
-async function upgrade(url: string, headers: Record<string, string>): Promise<Response> {
+// cycle = true keeps the old behaviour (the socket closes 8 s in and the next loop reconnects): held
+// open, the Coinbase ticker went quiet after its first message (Nov 23, ~1 message per 10 s against
+// ~10 a second when tested outside the Worker), while its old 8-second cycle delivered prices. Until
+// that's understood, the ticker keeps its cycle and everything else stays connected.
+async function upgrade(url: string, headers: Record<string, string>, cycle = false): Promise<Response> {
+  if (cycle) return fetch(url, { headers: { ...headers, Upgrade: 'websocket' }, signal: AbortSignal.timeout(8_000) });
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 8_000);
   try { return await fetch(url, { headers: { ...headers, Upgrade: 'websocket' }, signal: ac.signal }); }
@@ -689,7 +694,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   // Coinbase's public ticker: the bitcoin mid on every trade. Each update also re-checks the open
   // windows, since a bitcoin move is exactly when the market's price goes stale.
   private async connectCb(now: number) {
-    const res = await upgrade(CB_WS, { ...UA });
+    const res = await upgrade(CB_WS, { ...UA }, true);
     const ws = res.webSocket;
     if (!ws) throw new Error(`ticker refused: HTTP ${res.status}`);
     ws.accept();
