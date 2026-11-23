@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from '../src/replica.ts';
-import { recordKelly, stakeFor } from '../src/fairvalue.ts';
+import { edgeFloor, recordKelly, stakeFor } from '../src/fairvalue.ts';
 import { returnStats } from '../src/ready.ts';
+import { takeProfitFor } from '../src/paper.ts';
 import { gradeSports, type SportsMark } from '../src/sportsgrade.ts';
 import { parseFill } from '../src/polymarket.ts';
 
@@ -120,4 +121,24 @@ test('a short buy is shown as the team actually bought', () => {
     id: 'O2', marketSlug: 'aec-nfl-bal-car-2026-11-22', intent: 'ORDER_INTENT_BUY_LONG',
     marketMetadata: { title: 'BAL Ravens vs. CAR Panthers', outcome: 'Ravens', team: { safeName: 'BAL Ravens' } } } } } })!;
   assert.equal(g.title, 'BAL Ravens');
+});
+
+test('edgeFloor: a negative veto lets slightly rich prices through; positive vetoes and the leader bar are unchanged', () => {
+  const raw = { veto: () => -0.08 };
+  assert.equal(edgeFloor(raw, 0.9, -5), -0.08);              // was clamped to 0 before the fix
+  assert.ok(-0.03 >= edgeFloor(raw, 0.9, -5));               // a price the math rates 3c rich still qualifies
+  assert.equal(edgeFloor({ veto: () => 0.03 }, 0.9, -5), 0.03);
+  const value = { veto: (p: number) => (p > 0.5 ? 0.06 : 0.04), leaderEdge: 0.08 };
+  assert.equal(edgeFloor(value, 0.3, -2), 0.04);
+  assert.equal(edgeFloor(value, 0.6, -2), 0.06);
+  assert.equal(edgeFloor(value, 0.3, 4), 0.08);              // a leader needs the bigger edge
+  const trailer = { veto: (p: number) => (p < 0.5 ? 0.02 : 0.03) };
+  for (const [p, lead] of [[0.2, -3], [0.7, -8], [0.4, 2]] as const) assert.equal(edgeFloor(trailer, p, lead), p < 0.5 ? 0.02 : 0.03);
+});
+
+test('takeProfitFor: the late swing rests its 2x sell at any entry; other strategies only under 15c', () => {
+  assert.equal(takeProfitFor(0.12), 0.24);
+  assert.equal(takeProfitFor(0.2), null);
+  assert.equal(takeProfitFor(0.2, 1), 0.4);
+  assert.equal(takeProfitFor(0.6, 1), 0.99);
 });

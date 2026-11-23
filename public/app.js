@@ -511,6 +511,9 @@ const STRATEGY_LABEL = {
   hoops_trailer_deep: 'Basketball · your style, deeper dips',
   hoops_value_v1: 'Basketball · model value',
   hoops_comeback_v1: 'Basketball · your comeback cash-out',
+  hoops_swing_v1: 'Basketball · late swing, cash out at 2×',
+  hoops_swing_stop: 'Basketball · late swing, cut at half',
+  hoops_swing_model: 'Basketball · late swing, math picks',
 };
 const variantOf = (id) => (STRATEGY_LABEL[id] || id || '').split(' · ')[1] || '';
 const groupOf = (s) => (s?.startsWith('crypto_') ? 'btc' : s?.startsWith('hoops_') ? 'hoops' : 'other');

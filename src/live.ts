@@ -20,7 +20,7 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import { ESPN_PATHS, fetchScoreboard, gameLine, gameState, longSide, matchEvent } from './espn';
-import { LEAGUE, dailyStopHit, isBlowout, riskLimits, shareLeft, sportFair, stakeFor } from './fairvalue';
+import { LEAGUE, dailyStopHit, drawdownScale, edgeFloor, isBlowout, riskLimits, shareLeft, sportFair, stakeFor } from './fairvalue';
 import { addToPosition, bankroll, closePosition, loadOpen, openPosition, settlePosition, type Position } from './paper';
 import { SPORTS_POINTS, SPORTS_POINT_TOL } from './sportsgrade';
 
@@ -77,8 +77,13 @@ interface HoopsStrategy {
   maxAdds?: number;             // adds allowed (default 2)
   addBefore?: number;           // adds only before this share of the game (default: any time the rules allow)
   oneShot?: boolean;            // one position per game: no buying back in after it closes
+  lateWindow?: [number, number];  // new positions only with this many minutes left (from, to)
+  deficit?: [number, number];     // ...and only when behind by this many points (from, to)
+  fixedShare?: number;            // bet this share of the account (inside the ladder) instead of Kelly
+  target2x?: boolean;             // a resting sell at twice the entry (no fee)
+  stopHalf?: boolean;             // sell at the bid if the price falls to half the entry
 }
-// Each runs its own $30 paper account and can hold its own position in any game.
+// Each runs its own paper account and can hold its own position in any game.
 const HOOPS_STRATEGIES: HoopsStrategy[] = [
   { id: 'hoops_trailer_v1', maxOpen: 2, trailing: true, maxProgress: 0.75, minDiscount: 0.05, veto: (p) => (p < 0.5 ? 0.02 : 0.03), priceMin: 0.2, priceMax: 0.65 },
   { id: 'hoops_trailer_h1', maxOpen: 2, trailing: true, maxProgress: 0.5, minDiscount: 0.05, veto: () => 0.02, priceMin: 0.2, priceMax: 0.65 },
@@ -91,6 +96,20 @@ const HOOPS_STRATEGIES: HoopsStrategy[] = [
   // once out, done with that game (his Nov 22 Pistons re-buy after cashing out lost $38.86).
   { id: 'hoops_comeback_v1', maxOpen: 2, trailing: true, favoriteOnly: true, maxProgress: 0.75, minDiscount: 0.08, veto: () => 0.02, priceMin: 0.15, priceMax: 0.7,
     comeback: 0.5, comebackMin: 0.08, maxAdds: 1, addBefore: 0.5, oneShot: true },
+  // Aaron's late swing: 3-12 minutes left, a team down 3-9 at 8-25¢, bought for the next run rather
+  // than the result and cashed out at 2x with a resting sell; no adds, one position per game, a fixed
+  // 2% of the account so the three compare on equal terms, and no model exit (2x, the stop or the
+  // final only). His record so far argues against it: 25 such buys (trailing, last 25% of the game,
+  // under 25¢) touched 2x 7 times where fair prices would have 12.5, while his first-half trailing buys
+  // touched it 20 times against 11.6. So three versions: his raw play (the math only blocks prices it
+  // rates 8¢+ rich, which is more likely bad data), the same with his "protect the account" cut at
+  // half the entry, and one where the math must rate the price 3¢ cheap after fees.
+  { id: 'hoops_swing_v1', maxOpen: 2, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => -0.08, priceMin: 0.08, priceMax: 0.25,
+    lateWindow: [3, 12], deficit: [3, 9], fixedShare: 0.02, target2x: true, maxAdds: 0, oneShot: true },
+  { id: 'hoops_swing_stop', maxOpen: 2, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => -0.08, priceMin: 0.08, priceMax: 0.25,
+    lateWindow: [3, 12], deficit: [3, 9], fixedShare: 0.02, target2x: true, stopHalf: true, maxAdds: 0, oneShot: true },
+  { id: 'hoops_swing_model', maxOpen: 2, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => 0.03, priceMin: 0.08, priceMax: 0.25,
+    lateWindow: [3, 12], deficit: [3, 9], fixedShare: 0.02, target2x: true, maxAdds: 0, oneShot: true },
 ];
 const MAX_EDGE = 0.12;          // a bigger "edge" is more likely our data being stale than a gift
 // Our scoreboard can lag the market, worst around the buzzer, when ESPN posts the last baskets
@@ -535,6 +554,17 @@ export class LiveFeed extends DurableObject<LiveEnv> {
             await closePosition(db, held, { price: held.take_profit, coef: COEF, maker: true, reason: `take-profit at ${cents(held.take_profit)}`, now });
             continue;
           }
+          if (st.target2x && held.avg_entry != null) {
+            const target = Math.min(0.99, Math.round(held.avg_entry * 2 * 100) / 100);
+            if (v.bid >= target) {
+              await closePosition(db, held, { price: target, coef: COEF, maker: true, reason: `2x cash-out at ${cents(target)} (in at ${cents(held.avg_entry)}), ${where(v.lead)}`, now });
+              continue;
+            }
+          }
+          if (st.stopHalf && held.avg_entry != null && v.bid > 0 && v.bid <= held.avg_entry * 0.5 && fresh) {
+            await closePosition(db, held, { price: v.bid, coef: COEF, maker: false, reason: `cut at half: bid ${cents(v.bid)} (in at ${cents(held.avg_entry)}), ${where(v.lead)}`, now });
+            continue;
+          }
           if (st.comeback != null && held.avg_entry != null) {
             const target = Math.min(0.99, Math.round((held.avg_entry + Math.max(st.comebackMin ?? 0, st.comeback * (v.start - held.avg_entry))) * 100) / 100);
             if (v.bid >= target) {
@@ -542,7 +572,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
               continue;
             }
           }
-          if (fresh && calm && settled && minsLeft > 3 && v.bid >= v.fair + feePer(v.bid) + 0.04) {
+          if (!st.target2x && fresh && calm && settled && minsLeft > 3 && v.bid >= v.fair + feePer(v.bid) + 0.04) {
             await closePosition(db, held, { price: v.bid, coef: COEF, maker: false, reason: `above fair: bid ${cents(v.bid)} vs fair ${cents(v.fair)}, ${where(v.lead)}`, now });
             continue;
           }
@@ -564,17 +594,26 @@ export class LiveFeed extends DurableObject<LiveEnv> {
         // New position: first part of the game, fresh, calm, settled data only.
         if (!fresh || !calm || !settled || buzzer || prog >= st.maxProgress || minsLeft <= 3) continue;
         if (this.open.filter((p) => p.strategy === st.id && p.status === 'open').length >= st.maxOpen) continue;
+        if (st.lateWindow && (minsLeft < st.lateWindow[0] || minsLeft > st.lateWindow[1])) continue;
         const pick = (['long', 'short'] as Side[]).map(view)
           .filter((v) => !isBlowout(m.league, v.lead, g.period, g.clock) && v.ask >= st.priceMin && v.ask <= st.priceMax && v.edge <= MAX_EDGE)
           .filter((v) => (st.trailing ? v.lead < 0 && v.ask <= v.start - st.minDiscount : true))
           .filter((v) => !st.favoriteOnly || v.start >= 0.5)
-          .filter((v) => v.edge >= Math.max(st.veto(prog), v.lead > 0 && st.leaderEdge ? st.leaderEdge : 0))
+          .filter((v) => !st.deficit || (-v.lead >= st.deficit[0] && -v.lead <= st.deficit[1]))
+          .filter((v) => v.edge >= edgeFloor(st, prog, v.lead))
           .sort((x, y) => y.edge - x.edge)[0];
         if (!pick) continue;
         if (st.oneShot && await db.prepare("SELECT 1 FROM bot_positions WHERE strategy = ? AND market_slug = ? AND status != 'open' LIMIT 1").bind(st.id, m.slug).first()) continue;
         const bank = await bankroll(db, allocation, now, st.id);
         if (dailyStopHit(bank.equity, bank.today, bank.peak)) continue;
-        const stake = stakeFor({ fair: pick.fair, price: pick.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet, ceiling: ceiling(this.env) });
+        let stake: number;
+        if (st.fixedShare) {
+          const peak = Math.max(bank.peak, bank.equity), lim = riskLimits(peak), cap = ceiling(this.env);
+          stake = Math.min(bank.equity * st.fixedShare * drawdownScale(bank.equity, peak, lim.dd), bank.available, bank.equity * lim.bet,
+            Math.max(0, bank.equity * lim.open - bank.openNet), cap ?? Infinity);
+        } else {
+          stake = stakeFor({ fair: pick.fair, price: pick.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet, ceiling: ceiling(this.env) });
+        }
         const qty = Math.floor(stake / pick.ask);
         if (qty < 1) continue;
         const why = st.trailing
@@ -582,7 +621,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
           : `fair ${cents(pick.fair)} vs ask ${cents(pick.ask)}, ${where(pick.lead)}`;
         const pos = await openPosition(db, {
           strategy: st.id, slug: m.slug, title: `${m.long_team || 'Home'} vs. ${m.short_team || 'Away'}`, side: pick.side,
-          sideName: pick.team, ask: pick.ask, qty, coef: COEF, reason: why, now,
+          sideName: pick.team, ask: pick.ask, qty, coef: COEF, reason: why, now, tpBelow: st.target2x ? 1 : undefined,
         });
         this.open.push(pos);
         heldHere.push(pos);

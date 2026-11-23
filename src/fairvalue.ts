@@ -193,6 +193,13 @@ export function stakeFor(o: {
   return Math.max(0, Math.min(k, cap));
 }
 
+// The least edge (fair - ask - fee) a strategy takes on a side: its veto, raised to the leader bar for a
+// team that is ahead. A negative veto lets through prices the math rates slightly rich (Aaron's raw plays).
+export function edgeFloor(st: { veto: (progress: number) => number; leaderEdge?: number }, progress: number, lead: number): number {
+  const v = st.veto(progress);
+  return lead > 0 && st.leaderEdge ? Math.max(v, st.leaderEdge) : v;
+}
+
 // A strategy's own record as a bet size. Kelly for a bet that returns R per dollar is about
 // E[R] / E[R²]; the record bets on its return minus one standard error (hours or games as the unit,
 // see returnStats), so only on edge it has shown beyond luck, and nothing until it has 50+ closed
