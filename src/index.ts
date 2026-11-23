@@ -137,7 +137,7 @@ async function state(env: Env) {
       gemini: fresh(S.gm_stream) ? S.gm_stream.n / 10 : 0,
       volScale: S.btc_mult ? S.btc_mult.n / 100 : 1,
       mathWeight: S.btc_trust ? S.btc_trust.n / 100 : 0.5,   // the blend's weight on the math (stored in hundredths)
-      skipped: S.gap_skips?.n ?? 0,
+      skipped: S.gap_skips?.n ?? 0, feeSkips: S.fee_skips?.n ?? 0,
       paused: { feeds: S.feed_skips?.n ?? 0, jumps: S.jump_skips?.n ?? 0, news: S.event_skips?.n ?? 0 },
       replicaBooks: fresh(S.replica_books) ? S.replica_books.n : 0,   // order books behind the index copy, of 3
     },
@@ -181,8 +181,8 @@ async function bot(env: Env, book: Book) {
   const block = async (mode: 'paper' | 'live') => {
     const open = await q<any>(`SELECT * FROM bot_positions WHERE mode = ? AND status = 'open'${scope} ORDER BY opened_at DESC LIMIT 50`, mode);
     const history = await q<any>(`SELECT * FROM bot_positions WHERE mode = ? AND status != 'open'${scope} ORDER BY closed_at DESC LIMIT 100`, mode);
-    const totals = (await q<{ realized: number | null; n: number; wins: number }>(
-      `SELECT SUM(pnl) AS realized, COUNT(*) AS n, SUM(pnl > 0) AS wins FROM bot_positions WHERE mode = ? AND status != 'open'${scope}`, mode))[0];
+    const totals = (await q<{ realized: number | null; n: number; wins: number; fees: number | null; staked: number | null }>(
+      `SELECT SUM(pnl) AS realized, COUNT(*) AS n, SUM(pnl > 0) AS wins, SUM(fees) AS fees, SUM(cost) AS staked FROM bot_positions WHERE mode = ? AND status != 'open'${scope}`, mode))[0];
     let unrealized = 0, atRisk = 0;
     const positions = [];
     for (const p of open) {
@@ -203,6 +203,8 @@ async function bot(env: Env, book: Book) {
       equity: allocation + realized + unrealized,
       available: Math.max(0, allocation + realized - atRisk),
       record: { closed: totals?.n || 0, wins: totals?.wins || 0 },
+      // Fees paid on closed trades and the money they were paid on (paper charges the full 0.095).
+      fees: totals?.fees || 0, staked: totals?.staked || 0,
       positions, history,
     };
   };
@@ -236,9 +238,9 @@ async function bot(env: Env, book: Book) {
     records = fromBrain('btc_records');
     if (tod) delete tod.bins;
     const st = Object.fromEntries((await q<{ k: string; n: number }>(
-      "SELECT k, n FROM stats WHERE k IN ('gap_skips', 'feed_skips', 'jump_skips', 'event_skips')")).map((r) => [r.k, r.n]));
+      "SELECT k, n FROM stats WHERE k IN ('gap_skips', 'feed_skips', 'jump_skips', 'event_skips', 'fee_skips')")).map((r) => [r.k, r.n]));
     model = {
-      ...(graded || {}), basis, tod, replica, skips: st.gap_skips || 0,
+      ...(graded || {}), basis, tod, replica, skips: st.gap_skips || 0, feeSkips: st.fee_skips || 0,
       // Times it held off: the exchanges disagreed, bitcoin had just jumped, a release was due
       paused: { feeds: st.feed_skips || 0, jumps: st.jump_skips || 0, news: st.event_skips || 0 },
       nextEvent: nextEvent(Date.now()),

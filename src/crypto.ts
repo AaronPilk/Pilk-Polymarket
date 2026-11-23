@@ -103,6 +103,11 @@ const MARK_EVERY = 30_000;
 const TUNE_EVERY = 30 * MIN;
 const MAX_EDGE = 0.3;           // an "edge" bigger than this is bad data, not a gift
 const MAX_GAP = 0.15;           // math this far over the market's mid: our data is off (1 win in 9, Nov 22)
+// A bet has to clear the fee on the bot's best estimate, not on the raw math: the blend of math and
+// market the grading has learned (50/50 until it is fitted at 100 windows) must beat the price by this
+// much after the taker fee. Nov 22: entries flagged by the raw math alone paid ~6% of every dollar in
+// fees (11% on cheap round trips) while the market's price was the sharper of the two.
+const BLEND_EDGE = 0.01;
 const BASIS_ALPHA = 0.3;        // how fast each exchange's learned offset follows new official prices
 const BASIS_MAX = 50;           // a gap bigger than $50 is a broken feed, not an offset
 const FEED_GAP_BP = 2.5e-4;    // Coinbase and Gemini (both lined up with the index) more than 2.5 bp apart (~$15 at
@@ -199,7 +204,7 @@ interface CryptoEnv extends Partial<PmEnv> {
 }
 type Side = 'long' | 'short';
 type Src = 'stream' | 'poll';
-type Kind = 'crypto_ticks' | 'crypto_signals' | 'spot' | 'gap_skips' | 'feed_skips' | 'jump_skips' | 'event_skips';
+type Kind = 'crypto_ticks' | 'crypto_signals' | 'spot' | 'gap_skips' | 'feed_skips' | 'jump_skips' | 'event_skips' | 'fee_skips';
 interface Win { slug: string; series: string; start: number; end: number; lookback: number }
 interface Quote { bid: number | null; ask: number | null; ts: number; src: Src; state: string | null; bidShares: number | null; askShares: number | null }
 interface Conn { ws: WebSocket; slugs: string[]; at: number; last: number; n: number }
@@ -303,8 +308,8 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private settledAt = 0;
   private ladderAt = 0;
   private tunedAt = 0;
-  private counts: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0, feed_skips: 0, jump_skips: 0, event_skips: 0 };
-  private lastAt: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0, feed_skips: 0, jump_skips: 0, event_skips: 0 };
+  private counts: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0, feed_skips: 0, jump_skips: 0, event_skips: 0, fee_skips: 0 };
+  private lastAt: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0, feed_skips: 0, jump_skips: 0, event_skips: 0, fee_skips: 0 };
   private flushedAt = 0;
 
   async fetch(_req: Request): Promise<Response> {
@@ -1101,6 +1106,9 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       // The data check: math way over the market's mid means our price is off, not a gift.
       const midSide = mid == null ? null : best.side === 'long' ? mid : 1 - mid;
       if (midSide != null && best.fair - midSide > MAX_GAP) { this.seen.delete(key); this.gapSkip(w, best, midSide, f, tau, now); continue; }
+      // The fee check: on the blend (what the bot actually believes), the bet must still beat the
+      // price after the fee. With the market the sharper one, this is what stops it paying fees for nothing.
+      if (this.sizingProb(best, mid) - best.ask - feePer(best.ask) < BLEND_EDGE) { this.seen.delete(key); this.guardSkip('fee_skips', w, now); continue; }
       // On the stream, the price has to still be there 0.6 s later, like a real order landing.
       if (src === 'stream') {
         const s = this.seen.get(key);
@@ -1117,9 +1125,9 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
             fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(), recordKelly: this.records.get(st.id)?.f ?? 0,
           });
           let qty = Math.floor(stake / best.ask);
-          // A probe: the math flagged the trade but neither the blend nor the record backs a real
-          // bet. On paper it still buys one contract, so every strategy keeps learning.
-          // It stays inside the ladder: room under the one-bet and all-open limits, and none at the floor.
+          // A probe: the blend clears the fee but the stake rounds to under one contract. On paper it
+          // still buys one, so the strategy keeps learning. It stays inside the ladder: room under the
+          // one-bet and all-open limits, and none at the floor.
           const lim = riskLimits(Math.max(bank.peak, bank.equity));
           const room = Math.min(bank.available, bank.equity * lim.bet, Math.max(0, bank.equity * lim.open - bank.openNet));
           const probe = qty < 1 && best.ask <= room && drawdownScale(bank.equity, Math.max(bank.peak, bank.equity), lim.dd) > 0 && (best.depth == null || best.depth >= 1);
@@ -1208,7 +1216,11 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     if (p.status !== 'open' || !this.liveOn()) return; // switched off: open positions ride to the result
     const st = BY_ID.get(p.strategy);
     if (!st || st.exitAbove == null || fair == null || tau < (st.tauMax != null ? 8 : 20)) return;
-    const fairSide = p.side === 'long' ? fair : 1 - fair;
+    // Exits judge the bid against the blend too: sell early only when the bid, after its fee, beats what
+    // the bot believes holding is worth. Otherwise it rides to the result, which costs no fee.
+    const qMid = q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : null;
+    const up = blendProb(this.blend, fair, qMid ?? fair);
+    const fairSide = p.side === 'long' ? up : 1 - up;
     const key = `lx|${p.id}`;
     if (bidSide < fairSide + feeLive(bidSide) + st.exitAbove) { this.seen.delete(key); return; }
     if (src === 'stream') {
@@ -1269,7 +1281,11 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     }
     const st = BY_ID.get(p.strategy);
     if (!st || st.exitAbove == null || fair == null || tau < (st.tauMax != null ? 8 : 20)) return;
-    const fairSide = p.side === 'long' ? fair : 1 - fair;
+    // Exits judge the bid against the blend too: sell early only when the bid, after its fee, beats what
+    // the bot believes holding is worth. Otherwise it rides to the result, which costs no fee.
+    const qMid = q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : null;
+    const up = blendProb(this.blend, fair, qMid ?? fair);
+    const fairSide = p.side === 'long' ? up : 1 - up;
     if (st.makerExit) {
       // A resting sell kept at fair + exitAbove (re-priced as fair moves). It fills, with no fee,
       // only once buyers bid up to it, the same rule as the 2x take-profit.
@@ -1593,7 +1609,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     const add = this.env.DB.prepare('INSERT INTO stats (k, n, last) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET n = n + excluded.n, last = excluded.last');
     const set = this.env.DB.prepare('INSERT INTO stats (k, n, last) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET n = excluded.n, last = excluded.last');
     const stmts: D1PreparedStatement[] = [];
-    for (const k of ['crypto_ticks', 'crypto_signals', 'spot', 'gap_skips', 'feed_skips', 'jump_skips', 'event_skips'] as Kind[]) if (this.counts[k]) stmts.push(add.bind(k, this.counts[k], this.lastAt[k]));
+    for (const k of ['crypto_ticks', 'crypto_signals', 'spot', 'gap_skips', 'feed_skips', 'jump_skips', 'event_skips', 'fee_skips'] as Kind[]) if (this.counts[k]) stmts.push(add.bind(k, this.counts[k], this.lastAt[k]));
     if (this.spot) stmts.push(set.bind('btc_cents', Math.round(this.spot.price * 100), now));
     const pmLive = !!this.pm && now - this.pm.last < STREAM_STALE, cbLive = !!this.cb && now - this.cb.last < STREAM_STALE;
     stmts.push(set.bind('pm_stream', pmLive ? Math.round((this.pmMsgs / secs) * 10) : 0, now));  // updates per 10 s
@@ -1604,7 +1620,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     stmts.push(set.bind('btc_mult', Math.round(this.mult * 100), now));
     stmts.push(set.bind('replica_books', BOOK_IDS.filter((x) => now - this.bk[x].book.at <= 10_000).length, now));
     await this.env.DB.batch(stmts);
-    this.counts = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0, feed_skips: 0, jump_skips: 0, event_skips: 0 };
+    this.counts = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0, feed_skips: 0, jump_skips: 0, event_skips: 0, fee_skips: 0 };
     this.pmMsgs = 0; this.cbMsgs = 0; this.gmMsgs = 0;
     this.flushedAt = now;
   }
