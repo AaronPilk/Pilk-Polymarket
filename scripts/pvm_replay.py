@@ -72,13 +72,14 @@ def fetch_missing(wins, info):
                 except (TypeError, ValueError): strike = None
                 info[m['slug']] = {'up': int(prices[li]), 'strike': strike}
 
-def coinbase(t0, t1):
+def coinbase(t0, t1, product='BTC-USD'):
     """time of minute start -> close (the price at the end of that minute)."""
     out, step, t = {}, 299 * 60, t0 - t0 % 60
     while t < t1:
         a, b = t, min(t + step, t1)
-        url = f'https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=60&start={iso(a)}&end={iso(b)}'
-        j = fr.get(url) if b > time.time() - 600 else fr.cached(f'cb-{a}-{b}', lambda: fr.get(url))
+        url = f'https://api.exchange.coinbase.com/products/{product}/candles?granularity=60&start={iso(a)}&end={iso(b)}'
+        key = f'cb-{a}-{b}' if product == 'BTC-USD' else f'cb-{product}-{a}-{b}'
+        j = fr.get(url) if b > time.time() - 600 else fr.cached(key, lambda: fr.get(url))
         for row in j or []:
             if isinstance(row, list) and len(row) >= 5: out[int(row[0])] = float(row[4])
         t = b

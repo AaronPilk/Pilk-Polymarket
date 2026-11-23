@@ -28,7 +28,8 @@ Maker buys (not in the bot yet): a resting buy at the side's bid, no fee, held t
                  re-priced each minute while that holds, cancelled when it doesn't or at 4 minutes left
     m_fair_up1   the same, 1c over the bid when the spread is 2c+
     m_both       bids on both sides at every early point, each side filled at most once
-  Fill rules, from strict to loose: 'through' (the side's ask at the next point is at or under the
+  Points with a crossed book (Up ask + Down ask under $1, impossible on the exchange) are dropped as
+bad data. Fill rules, from strict to loose: 'through' (the side's ask at the next point is at or under the
   order: the price traded down to it), 'touch' (or the side's bid fell under the order), 'instant'
   (filled the moment it is placed: no adverse selection, an upper bound).
 
@@ -36,9 +37,14 @@ P&L is per contract, clustered by hour for the t-stat. Verdict rules (fixed befo
 retire a live test only on t <= -2 over 300+ bets with both halves of the period losing; add a
 maker test only on t >= 2 over 300+ fills under the strict 'through' rule with both halves winning.
 
-Run: python3 scripts/strategy_replay.py [days]
+Also the 98-99c favorite (crypto_fav_98): the side at 98-99c with 150-210 s left, held to the result.
+
+Other assets: --asset xrp replays Polymarket's XRP windows (cpcxrp-xrp-updown-*, settled on CF
+Benchmarks' XRPUSD_RTI) on Coinbase's XRP-USD minutes, with the bot's rules unchanged.
+
+Run: python3 scripts/strategy_replay.py [days] [--asset xrp]
 """
-import datetime as dt, json, math, statistics, sys
+import concurrent.futures as cf, datetime as dt, json, math, statistics, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fav_replay as fr
@@ -72,6 +78,9 @@ def points(hist, e, strike, px, offs):
         p = Pt(); p.real = (h.get('timestamp') or 0) + fr.SHIFT; p.tau = e - p.real
         if p.tau <= 0: continue
         p.up, p.dn = float(up), float(dn)
+        # A crossed book (Up ask + Down ask under $1) can't exist on the exchange: it's a stale or
+        # one-sided point in the history (8.8% of XRP 1h points, 0.1-0.7% for BTC). Skipped as bad data.
+        if p.up + p.dn < 0.995: continue
         p.mid = (p.up + 1 - p.dn) / 2
         spot, sig = px.at(p.real), px.sigma(p.real)
         p.f = pv.fair_up(spot + pv.offset_at(offs, p.real), strike, sig, p.tau) if (spot and sig and p.tau >= 60) else None
@@ -210,20 +219,37 @@ def score(rows, split=None):
         out['n_halves'] = [len(h1), len(h2)]
     return out
 
+ASSETS = {'btc': ('cpc-btc-updown', 'BTC-USD'), 'xrp': ('cpcxrp-xrp-updown', 'XRP-USD')}
+
+def fav98(pts, won_up):
+    """crypto_fav_98: the first point with 150-210 s left where a side asks 98-99c; held to the result."""
+    for pt in pts:
+        if not (150 <= pt.tau <= 210): continue
+        for side in (1, 0):
+            a = ask_of(pt, side)
+            if 0.98 <= a <= 0.99:
+                return [(pt, a, (1.0 if won_up == side else 0.0) - a - fee(a), 'held', won_up == side)]
+    return []
+
 def main():
-    days = int(sys.argv[1]) if len(sys.argv) > 1 else 30
+    args = [a for a in sys.argv[1:] if not a.startswith('--')]
+    days = int(args[0]) if args else 30
+    asset = sys.argv[sys.argv.index('--asset') + 1] if '--asset' in sys.argv else 'btc'
+    prefix, product = ASSETS[asset]
+    fr.slug = lambda series, t: f"{prefix}-{series}-{dt.datetime.fromtimestamp(t, dt.timezone.utc):%Y-%m-%d-%H%M}z"
     fr.CACHE.mkdir(exist_ok=True)
     wins = fr.windows(days)
-    info = pv.load_markets()
+    info = {k: v for k, v in pv.load_markets().items() if k.startswith(prefix)}   # one asset's windows only
     pv.fetch_missing(wins, info)
     todo = [w for w in wins if fr.slug(w[0], w[1]) in info and info[fr.slug(w[0], w[1])]['strike']]
-    hists = {fr.slug(*w[:2]): fr.history(*w) for w in todo}
-    px = pv.Prices(pv.coinbase(wins[0][1] - 3 * 3600, wins[-1][2] + 60))
+    with cf.ThreadPoolExecutor(8) as ex:
+        hists = dict(zip([fr.slug(*w[:2]) for w in todo], ex.map(lambda w: fr.history(*w), todo)))
+    px = pv.Prices(pv.coinbase(wins[0][1] - 3 * 3600, wins[-1][2] + 60, product))
     offs = pv.offsets(info, px)
     split = (wins[0][1] + wins[-1][2]) // 2
-    print(f'{days} days: {len(wins)} windows, {len(todo)} resolved with a start price, '
+    print(f'{asset} {days} days: {len(wins)} windows, {len(todo)} resolved with a start price, '
           f'{sum(1 for w in todo if hists[fr.slug(*w[:2])])} with price history, {len(px.t)} Coinbase minutes')
-    rows = {k: [] for k in list(STRATS) + [f'{m}:{r}' for m in ('m_fair', 'm_fair_up1', 'm_both') for r in ('through', 'touch', 'instant')]}
+    rows = {k: [] for k in list(STRATS) + ['fav_98'] + [f'{m}:{r}' for m in ('m_fair', 'm_fair_up1', 'm_both') for r in ('through', 'touch', 'instant')]}
     exits = {k: {} for k in STRATS}
     lag_triggers = 0
     for series, s, e in todo:
@@ -242,16 +268,17 @@ def main():
             b = run_taker(pts, st, length, won_up)
             add(name, b)
             for x in b: exits[name][x[3]] = exits[name].get(x[3], 0) + 1
+        add('fav_98', fav98(pts, won_up))
         for rule in ('through', 'touch', 'instant'):
             add(f'm_fair:{rule}', run_maker(pts, length, won_up, rule))
             add(f'm_fair_up1:{rule}', run_maker(pts, length, won_up, rule, up1=True))
             add(f'm_both:{rule}', run_both(pts, length, won_up, rule))
-    out = {'days': days, 'windows': len(wins), 'resolved': len(todo), 'split': split, 'lag_minute_triggers_early': lag_triggers, 'results': {}}
+    out = {'asset': asset, 'days': days, 'windows': len(wins), 'resolved': len(todo), 'split': split, 'lag_minute_triggers_early': lag_triggers, 'results': {}}
     for key, rs in rows.items():
         res = {'all': score(rs, split), 'series': {sr: score([r for r in rs if r['series'] == sr], split) for sr in ('5m', '15m', '1h')}}
         if key in exits: res['exits'] = exits[key]
         out['results'][key] = res
-    Path('strategy_replay_result.json').write_text(json.dumps(out, indent=1, default=str))
+    Path('strategy_replay_result.json' if asset == 'btc' else f'strategy_replay_{asset}_result.json').write_text(json.dumps(out, indent=1, default=str))
     fmt = lambda v, d=3: '   —  ' if v is None else f'{v:+.{d}f}'
     print(f'lag proxy triggers with 4+ min left: {lag_triggers}')
     for key, res in out['results'].items():
