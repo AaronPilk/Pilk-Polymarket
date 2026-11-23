@@ -880,6 +880,12 @@ function exitCard(x) {
 // Head to head: both bots on the same rules. Return on money bet is the fair yardstick, since the
 // Bitcoin bot places far more (and smaller) bets than the Sports bot.
 const STATUS_PILL = { proven: ['won', 'Proven'], promising: ['open', 'Promising'], testing: ['', 'Testing'], retired: ['lost', 'Retired'] };
+// The quick score: the average move toward the bet a minute after it, once there are 5+ to go on.
+function quickLine(q) {
+  if (!q || !(q.n >= 5) || q.cents == null) return '';
+  return ` The minute after: ${q.cents >= 0 ? '+' : '−'}${Math.abs(q.cents).toFixed(1)}¢ a bet over ${q.n}${q.t != null ? ` (t ${q.t.toFixed(1)})` : ''}.`;
+}
+
 function researchCard(lab) {
   if (!lab?.strategies) return '<div class="card pad">Every 5 minutes the board judges each strategy on its bets under the new rules: losers retire, winners bet more. First verdicts in a few minutes.</div>';
   const order = { proven: 0, promising: 1, testing: 2, retired: 3 };
@@ -889,8 +895,8 @@ function researchCard(lab) {
   const count = (k) => rows.filter(([, v]) => v.status === k).length;
   return `<div class="card">
     <div class="row"><div class="row-main"><div class="row-title">Top 3 so far</div><div class="row-sub">${top.length ? top.join(' · ') : 'Nothing has earned it yet. A strategy needs 30 bets on the new rules and to be ahead even in its worst case.'}</div></div><div class="row-end dim">${count('proven')} proven · ${count('promising')} promising · ${count('testing')} testing · ${count('retired')} retired</div></div>
-    ${rows.map(([id, v]) => `<div class="row"><div class="row-main"><div class="row-title">${esc(variantOf(id))} <span class="pill ${STATUS_PILL[v.status]?.[0] || ''}">${STATUS_PILL[v.status]?.[1] || esc(v.status)}</span></div><div class="row-sub">${esc(v.reason || '')}</div></div><div class="row-end"><div class="row-amt ${tone(v.pnl || 0)}">${v.n ? money(v.pnl || 0, { sign: true }) : '–'}</div></div></div>`).join('')}
-    <div class="row-sub wrap pad">Judged on the fee each bet would pay at full size. Polymarket rounds fees to the cent, so a 1-contract test can pay 30% more or less than the real rate, and that goes away once a strategy bets bigger.</div>
+    ${rows.map(([id, v]) => `<div class="row"><div class="row-main"><div class="row-title">${esc(variantOf(id))} <span class="pill ${STATUS_PILL[v.status]?.[0] || ''}">${STATUS_PILL[v.status]?.[1] || esc(v.status)}</span></div><div class="row-sub">${esc(v.reason || '')}${quickLine(v.quick)}</div></div><div class="row-end"><div class="row-amt ${tone(v.pnl || 0)}">${v.n ? money(v.pnl || 0, { sign: true }) : '–'}</div></div></div>`).join('')}
+    <div class="row-sub wrap pad">Judged on the fee each bet would pay at full size. Polymarket rounds fees to the cent, so a 1-contract test can pay 30% more or less than the real rate, and that goes away once a strategy bets bigger. The minute after: how far the price moved toward each bet in the minute after it went in, an early read before results settle. Verdicts still go by money.</div>
   </div>`;
 }
 

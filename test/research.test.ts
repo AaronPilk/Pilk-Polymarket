@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RETIRED, board, judge, statusOf, AT_SIZE_SQL } from '../src/research.ts';
+import { RETIRED, board, judge, statusOf, AT_SIZE_SQL, QUICK_SQL, quickScore } from '../src/research.ts';
 import { readFileSync } from 'node:fs';
 
 // rows: one bet per row, $1 each, spread over `groups` hours (or games)
@@ -116,4 +116,48 @@ test('research board: a strategy that has never lost has to absorb one more full
   const later = judge('crypto_fav_98', fav(160, 32), 'btc');
   assert.equal(later.status, 'promising');
   assert.match(later.reason, /one more full loss/);
+});
+
+test('quick score: the move toward each bet a minute after it, from the 30-second marks', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(':memory:');
+  const schema = readFileSync(new URL('../schema.sql', import.meta.url), 'utf8');
+  for (const t of ['bot_positions', 'crypto_marks']) {
+    const m = schema.match(new RegExp(`CREATE TABLE IF NOT EXISTS ${t} \\([\\s\\S]*?\\) *(WITHOUT ROWID)?;`));
+    assert.ok(m, t);
+    db.exec(m[0]);
+  }
+  const T = 3_600_000 * 500;
+  const w = 'cpc-btc-updown-15m-2026-11-23-1800z';
+  const pos = db.prepare(`INSERT INTO bot_positions (id, mode, strategy, market_slug, side, status, opened_at, qty, cost, proceeds, fees, meta)
+    VALUES (?, 'paper', ?, ?, ?, 'open', ?, 1, 0.4, 0, 0, ?)`);
+  const mark = db.prepare('INSERT INTO crypto_marks (slug, ts, tau, bid, ask) VALUES (?, ?, 500, ?, ?)');
+  const meta = (mid: number, rules = 2) => JSON.stringify({ rules, mid });
+  // Up bought with the side's mid at 40¢: 30 s later it's 41¢ (too soon), 65 s later 45¢ (counts), 95 s later 50¢
+  pos.run('a', 'crypto_fair_v1', w, 'long', T, meta(0.4));
+  mark.run(w, T + 30_000, 0.40, 0.42); mark.run(w, T + 65_000, 0.44, 0.46); mark.run(w, T + 95_000, 0.49, 0.51);
+  // Down bought at a 55¢ mid while Up sat at 45¢ (another window); 70 s later Up is 40¢, so Down is 60¢: +5¢ too
+  const w2 = 'cpc-btc-updown-5m-2026-11-23-1805z';
+  pos.run('b', 'crypto_hold_v1', w2, 'short', T + 5_000, meta(0.55));
+  mark.run(w2, T + 35_000, 0.44, 0.46); mark.run(w2, T + 75_000, 0.39, 0.41);
+  // not counted: no mark 60-120 s after it, old rules, a ladder market
+  pos.run('c', 'crypto_fair_v1', w, 'long', T + 200_000, meta(0.4));
+  pos.run('d', 'crypto_fair_v1', w, 'long', T, meta(0.4, 1));
+  pos.run('e', 'crypto_ladder_v1', 'cpc-btc-above-day-2026-11-23-60000', 'long', T, meta(0.4));
+  const out = db.prepare(QUICK_SQL).all('crypto_%', 2) as Array<{ strategy: string; move: number; hr: number }>;
+  const by = Object.fromEntries(out.map((r) => [r.strategy, r]));
+  assert.equal(out.length, 2);
+  assert.ok(Math.abs(by.crypto_fair_v1.move - 0.05) < 1e-9, String(by.crypto_fair_v1.move));
+  assert.ok(Math.abs(by.crypto_hold_v1.move - 0.05) < 1e-9, String(by.crypto_hold_v1.move));
+  // The score: cents a bet, hours as the unit
+  const q = quickScore([{ move: 0.02, hr: 1 }, { move: 0.00, hr: 1 }, { move: 0.03, hr: 2 }, { move: -0.01, hr: 3 }, { move: 0.01, hr: 4 }, { move: null, hr: 4 }]);
+  assert.equal(q.n, 5);
+  assert.equal(q.cents, 1);
+  assert.ok(q.t != null && q.t > 0);
+  assert.equal(quickScore([{ move: 0.02, hr: 1 }, { move: 0.01, hr: 2 }]).t, null);   // under 3 hours: no t yet
+  assert.deepEqual(quickScore([]), { n: 0, cents: null, t: null });
+  // On the board next to the verdict, which still goes by money
+  const b = board(new Map(), ['crypto_fair_v1'], 'btc', 0, new Map([['crypto_fair_v1', q]]));
+  assert.deepEqual(b.strategies.crypto_fair_v1.quick, q);
+  assert.equal(b.strategies.crypto_fair_v1.status, 'testing');
 });

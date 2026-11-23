@@ -106,6 +106,7 @@ export function logLoss(p: number, y: number): number {
 export interface Mark {
   slug: string; tau: number; fair: number | null; bid: number | null; ask: number | null;
   spot: number; strike: number; sigma: number; avgObs: number | null; result: number;
+  target?: number;   // the checkpoint (seconds left) selectCheckpoints picked this mark for
 }
 
 // Volatility scales to try. Wide on the upside: on a quiet day the market prices bitcoin moves at
@@ -142,7 +143,7 @@ export function selectCheckpoints(marks: Mark[]): Mark[] {
     for (const target of sp.at) {
       let best: Mark | null = null;
       for (const m of ms) if (Math.abs(m.tau - target) <= sp.tol && (!best || Math.abs(m.tau - target) < Math.abs(best.tau - target))) best = m;
-      if (best) out.push(best);
+      if (best) out.push({ ...best, target });
     }
   }
   return out;
@@ -245,9 +246,13 @@ export function gradeModel(marks: Mark[], current = 1) {
   const pts = selectCheckpoints(marks);
   const perWindow = new Map<string, number>();
   for (const m of pts) perWindow.set(m.slug, (perWindow.get(m.slug) || 0) + 1);
-  // Each band weighs every window once among its own checkpoints.
+  // Each band weighs every window once among its own checkpoints. A checkpoint is filed by the moment
+  // it stands for, not the exact second of its mark: the 5m window's 4-minute check lands anywhere in
+  // 3:40-4:20 (the bot marks every 30 s), and filed by the second most of them fell into the last-4-minutes
+  // band (Nov 23: only ~30 of ~130 five-minute windows counted as early).
+  const bandFor = (m: Mark) => bandOf(m.target ?? m.tau);
   const perBand = new Map<string, number>();
-  for (const m of pts) { const k = `${bandOf(m.tau)}|${m.slug}`; perBand.set(k, (perBand.get(k) || 0) + 1); }
+  for (const m of pts) { const k = `${bandFor(m)}|${m.slug}`; perBand.set(k, (perBand.get(k) || 0) + 1); }
   const bandAcc: Record<Band, { fit: Array<{ x: number; z: number; y: number; w: number }>; w: number; model: number; market: number; windows: Set<string> }> = {
     early: { fit: [], w: 0, model: 0, market: 0, windows: new Set() },
     late: { fit: [], w: 0, model: 0, market: 0, windows: new Set() },
@@ -279,7 +284,7 @@ export function gradeModel(marks: Mark[], current = 1) {
       wPair += w; model += w * lm; market += w * lk;
       edgeByWindow.set(m.slug, (edgeByWindow.get(m.slug) || 0) + w * (lk - lm));
       fitPts.push({ x: logit(m.fair), z: logit(mid), y, w });
-      const band = bandOf(m.tau), B = bandAcc[band], wb = 1 / (perBand.get(`${band}|${m.slug}`) || 1);
+      const band = bandFor(m), B = bandAcc[band], wb = 1 / (perBand.get(`${band}|${m.slug}`) || 1);
       B.fit.push({ x: logit(m.fair), z: logit(mid), y, w: wb });
       B.w += wb; B.model += wb * lm; B.market += wb * lk; B.windows.add(m.slug);
       addBucket(marketBuckets, mid, y, w);

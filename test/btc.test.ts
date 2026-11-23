@@ -276,3 +276,15 @@ test('test bets keep the 50/50 start with 4+ minutes left; everything else is ju
   assert.ok(blendProb(judgingBlend(fitted, 'early', true), math, mid) - cost >= 0.01, 'clears on the 50/50 start');
   assert.ok(blendProb(judgingBlend(fitted, 'early', false), math, mid) - cost < 0.01, 'fails on the fit');
 });
+
+// Nov 23: the bot marks every 30 s, so a 5m window's 4-minute check often sits at 3:58 left. It stands
+// for the 4-minute moment, so it belongs in the early band (filed by the second, most of them didn't).
+test('checkpoints are filed by the moment they stand for, not the exact second of the mark', () => {
+  const marks: Mark[] = [];
+  for (let w = 0; w < 120; w++) {
+    for (const tau of [238, 150, 60]) marks.push({ slug: slugAt(w), tau, fair: 0.5, bid: 0.49, ask: 0.51, spot: 60000, strike: 60000, sigma: 5e-5, avgObs: null, result: w % 2 });
+  }
+  const g = gradeModel(marks);
+  assert.equal(g.bands.early.windows, 120);
+  assert.equal(g.bands.late.windows, 120);
+});

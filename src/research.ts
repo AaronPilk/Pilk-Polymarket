@@ -54,6 +54,34 @@ export interface Verdict {
   status: Status; reason: string;
   n: number; groups: number; pnl: number; cost: number;
   mean: number | null; se: number | null; t: number | null; low: number | null;
+  quick?: Quick;
+}
+
+// The quick score: how far the side's price moved, mid to mid, in about the minute after each bet (the
+// first of the bot's 30-second marks 60-120 s after entry). A bet's result takes the whole window; this
+// says within the hour whether a strategy's entries come before the price moves its way. It's shown next
+// to each verdict; the verdicts themselves still go by money.
+export const QUICK_SQL = `SELECT p.strategy, p.opened_at / 3600000 AS hr,
+    (CASE WHEN p.side = 'long' THEN (m.bid + m.ask) / 2 ELSE 1 - (m.bid + m.ask) / 2 END) - json_extract(p.meta, '$.mid') AS move
+  FROM bot_positions p
+  JOIN crypto_marks m ON m.slug = p.market_slug AND m.ts = (SELECT MIN(x.ts) FROM crypto_marks x
+    WHERE x.slug = p.market_slug AND x.ts BETWEEN p.opened_at + 60000 AND p.opened_at + 120000 AND x.bid IS NOT NULL AND x.ask IS NOT NULL)
+  WHERE p.mode = 'paper' AND p.strategy LIKE ? AND COALESCE(json_extract(p.meta, '$.rules'), 0) >= ?
+    AND json_extract(p.meta, '$.mid') IS NOT NULL AND p.market_slug LIKE '%-updown-%'`;
+
+export interface Quick { n: number; cents: number | null; t: number | null }
+// Average move in cents, with hours as the unit for the standard error (bets in the same hour move together).
+export function quickScore(rows: Array<{ move: number | null; hr: number }>): Quick {
+  const xs = rows.filter((r): r is { move: number; hr: number } => r.move != null && Number.isFinite(r.move));
+  const n = xs.length;
+  if (!n) return { n: 0, cents: null, t: null };
+  const mean = xs.reduce((a, r) => a + r.move, 0) / n;
+  const g = new Map<number, number>();
+  for (const r of xs) g.set(r.hr, (g.get(r.hr) || 0) + r.move - mean);
+  let ss = 0;
+  for (const v of g.values()) ss += v * v;
+  const se = g.size >= 3 ? Math.sqrt((g.size / (g.size - 1)) * ss) / n : null;
+  return { n, cents: Math.round(mean * 1000) / 10, t: se ? Math.round((mean / se) * 100) / 100 : null };
 }
 
 const pct = (x: number) => `${x >= 0 ? '+' : '−'}${Math.abs(x * 100).toFixed(1)}%`;
@@ -88,9 +116,13 @@ export function judge(id: string, rows: ReadyRow[], book: Book): Verdict {
   return { ...base, status: 'testing', reason: `No clear answer yet: ${line} (t ${t.toFixed(1)}). Still one contract a bet.` };
 }
 
-export function board(rowsBy: Map<string, ReadyRow[]>, ids: string[], book: Book, now = Date.now()) {
+export function board(rowsBy: Map<string, ReadyRow[]>, ids: string[], book: Book, now = Date.now(), quickBy?: Map<string, Quick>) {
   const strategies: Record<string, Verdict> = {};
-  for (const id of new Set([...ids, ...rowsBy.keys()])) strategies[id] = judge(id, rowsBy.get(id) || [], book);
+  for (const id of new Set([...ids, ...rowsBy.keys()])) {
+    strategies[id] = judge(id, rowsBy.get(id) || [], book);
+    const q = quickBy?.get(id);
+    if (q) strategies[id].quick = q;
+  }
   const rank = (v: Verdict) => (v.status === 'proven' ? 1 : 0) * 10 + (v.low ?? -1);
   const top = Object.entries(strategies)
     .filter(([, v]) => v.status === 'proven' || v.status === 'promising')

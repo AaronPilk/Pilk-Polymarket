@@ -3,7 +3,7 @@ import { recordMarkets, settleMarkets } from './recorder';
 import { bankroll } from './paper';
 import { RISK_LADDER, drawdownScale, riskLimits } from './fairvalue';
 import { readiness, type ReadyRow } from './ready';
-import { RULES, board, AT_SIZE_SQL } from './research';
+import { RULES, board, AT_SIZE_SQL, QUICK_SQL, quickScore, type Quick } from './research';
 import { nextEvent } from './cryptomath';
 import { gradeSports, type SportsMark } from './sportsgrade';
 export { LiveFeed } from './live';
@@ -170,7 +170,18 @@ async function researchBoards(env: Env) {
       a.push({ pnl: r.pnl, cost: r.cost, group: book === 'btc' ? r.hr : r.game });
       by.set(r.strategy, a);
     }
-    const b = board(by, book === 'btc' ? CRYPTO_IDS : HOOPS_IDS, book);
+    // The quick score (research.ts): bitcoin only, from the bot's 30-second marks. A failure here
+    // never holds up the verdicts.
+    let quick: Map<string, Quick> | undefined;
+    if (book === 'btc') {
+      try {
+        const q = await env.DB.prepare(QUICK_SQL).bind(BOOKS.btc, RULES).all<{ strategy: string; hr: number; move: number | null }>();
+        const qs = new Map<string, Array<{ move: number | null; hr: number }>>();
+        for (const r of q.results) { const a = qs.get(r.strategy) || []; a.push({ move: r.move, hr: r.hr }); qs.set(r.strategy, a); }
+        quick = new Map([...qs].map(([id, a]) => [id, quickScore(a)]));
+      } catch (e) { console.log('quick score error', String((e as any)?.message || e)); }
+    }
+    const b = board(by, book === 'btc' ? CRYPTO_IDS : HOOPS_IDS, book, Date.now(), quick);
     await env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
       .bind(`lab_${book}`, JSON.stringify(b), Date.now()).run();
   }

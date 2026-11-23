@@ -9,3 +9,5 @@ data/
 brain/
 .replay-cache/
 fav_replay_result.json
+pvm_replay_result.json
+__pycache__/
