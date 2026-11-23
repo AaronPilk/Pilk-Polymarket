@@ -337,6 +337,12 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private recSec = 0;
   private secReady = false;
   private secPrunedAt = 0;
+  // Diagnostics (noteEvent, flushLoop): stream message gaps and loop step times
+  private evtAt = 0;
+  private evtGaps: Array<[number, number, string, string, number]> = [];
+  private evtLast: [string, number] = ['', 0];
+  private loopSteps: Array<Record<string, number>> = [];
+  private loopAt = 0;
   private counts: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0, feed_skips: 0, jump_skips: 0, event_skips: 0, fee_skips: 0 };
   private lastAt: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0, feed_skips: 0, jump_skips: 0, event_skips: 0, fee_skips: 0 };
   private flushedAt = 0;
@@ -350,26 +356,33 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
 
   async alarm(): Promise<void> {
     const now = Date.now();
+    // Diagnostics: how long each step of the loop takes (ms), kept for the last 24 loops.
+    const step: Record<string, number> = { at: now };
+    let last = now;
+    const lap = (k: string) => { const t = Date.now(); step[k] = t - last; last = t; };
     try {
-      await this.boot(now);
-      await this.ensureStreams(now);
+      await this.boot(now); lap('boot');
+      await this.ensureStreams(now); lap('streams');
       const stmts: D1PreparedStatement[] = [];
-      await this.readSpot(now, stmts);
+      await this.readSpot(now, stmts); lap('spot');
       this.current = new Map(this.windowsAt(now).map((w) => [w.slug, w]));
-      if (now - this.openAt > 30_000) await this.serial(() => this.reloadOpen(now));
-      await this.recordWindows([...this.current.values()], now, stmts);
-      if (now - this.settledAt >= MIN) { this.settledAt = now; await this.settle(now, stmts); }
+      if (now - this.openAt > 30_000) { await this.serial(() => this.reloadOpen(now)); lap('reload'); }
+      await this.recordWindows([...this.current.values()], now, stmts); lap('record');
+      if (now - this.settledAt >= MIN) { this.settledAt = now; await this.settle(now, stmts); lap('settle'); }
       if (now - this.ladderAt >= LADDER_EVERY) {
         this.ladderAt = now;
         try { await this.ladderScan(now); } catch (e) { console.log('ladder error', String((e as any)?.message || e)); }
+        lap('ladder');
       }
       if (now - this.todAt >= TOD_EVERY) {
         this.todAt = now;
         try { this.learnTod(now); } catch (e) { console.log('tod error', String((e as any)?.message || e)); }
+        lap('tod');
       }
       if (now - this.tunedAt >= TUNE_EVERY) {
         this.tunedAt = now;
         try { await this.tune(now); } catch (e) { console.log('tune error', String((e as any)?.message || e)); }
+        lap('tune');
       }
       if (now - this.labAt >= 5 * MIN) {
         this.labAt = now;
@@ -377,16 +390,46 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
           const lb = await this.env.DB.prepare("SELECT v FROM brain WHERE k = 'lab_btc'").first<{ v: string }>();
           if (lb) this.lab = JSON.parse(lb.v);
         } catch (e) { console.log('lab error', String((e as any)?.message || e)); }
+        lap('lab');
       }
       stmts.push(...this.pendingStmts.splice(0));
+      step.stmts = stmts.length;
       for (let i = 0; i < stmts.length; i += 100) await this.env.DB.batch(stmts.slice(i, i + 100));
-      await this.flush(now);
-      await this.flushSeconds(now);
+      lap('batch');
+      await this.flush(now); lap('flush');
+      await this.flushSeconds(now); lap('secs');
+      await this.flushLoop(now);
     } catch (e) {
       console.log('crypto feed error', String((e as any)?.message || e));
     } finally {
       if ((await this.ctx.storage.getAlarm()) == null) await this.ctx.storage.setAlarm(Math.max(now + TICK, Date.now() + 1_000));
+      lap('alarm');
+      step.total = Date.now() - now;
+      this.loopSteps.push(step);
+      if (this.loopSteps.length > 24) this.loopSteps.shift();
     }
+  }
+
+  // Diagnostics (Nov 23): the per-second record showed the bot hearing nothing for 1-2 s every 10 s
+  // around this loop. Gaps of 0.8 s+ between incoming stream messages and each loop step's time go
+  // to brain btc_loop once a minute, to find the cause. Nothing reads it to trade.
+  // Each gap: [start ms, length ms, the message that ended it, the one before it, that one's size].
+  private noteEvent(now: number, src: string, data: unknown) {
+    if (this.evtAt && now - this.evtAt >= 800) {
+      this.evtGaps.push([this.evtAt, now - this.evtAt, src, this.evtLast[0], this.evtLast[1]]);
+      if (this.evtGaps.length > 60) this.evtGaps.shift();
+    }
+    this.evtAt = now;
+    this.evtLast = [src, typeof data === 'string' ? data.length : 0];
+  }
+
+  private async flushLoop(now: number) {
+    if (now - this.loopAt < MIN) return;
+    this.loopAt = now;
+    try {
+      await this.env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
+        .bind('btc_loop', JSON.stringify({ gaps: this.evtGaps, steps: this.loopSteps }), now).run();
+    } catch (e) { console.log('loop log error', String((e as any)?.message || e)); }
   }
 
   // ---------- start-up: pick up where the last run left off, so a deploy doesn't blind the bot
@@ -540,6 +583,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
 
   private onBook(f: BookFeed, conn: Conn, data: unknown) {
     const now = Date.now();
+    this.noteEvent(now, `book_${f}`, data);
     conn.last = now; conn.n++;
     const s = this.bk[f];
     if (s.conn !== conn || typeof data !== 'string') return;
@@ -611,6 +655,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
 
   private onPm(conn: Conn, data: unknown) {
     const now = Date.now();
+    this.noteEvent(now, 'pm', data);
     conn.last = now; conn.n++; this.pmMsgs++;
     if (typeof data !== 'string') return;
     let j: any;
@@ -645,6 +690,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
 
   private onCb(conn: Conn, data: unknown) {
     const now = Date.now();
+    this.noteEvent(now, 'cb', data);
     conn.last = now; conn.n++; this.cbMsgs++;
     if (typeof data !== 'string') return;
     let j: any;
@@ -676,6 +722,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
 
   private onGm(conn: Conn, data: unknown) {
     const now = Date.now();
+    this.noteEvent(now, 'gm', data);
     conn.last = now; conn.n++; this.gmMsgs++;   // heartbeats count too: they keep the connection fresh
     if (this.gm !== conn || typeof data !== 'string') return;
     let j: any;
