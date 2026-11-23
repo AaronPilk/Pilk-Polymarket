@@ -128,11 +128,13 @@ export function parseFill(a: any): Fill | null {
   const shares = n(exec.lastShares) ?? n(x.qtyDecimal ?? x.qty);
   if (pxLong == null || shares == null) return null;
   const meta = order.marketMetadata || x.marketMetadata || {};
-  const longTeam = meta.team?.safeName || meta.team?.name || meta.outcome;
+  // The order's metadata names the side it trades: a short buy on "DET Pistons vs. ATL Hawks" carries
+  // outcome "Hawks" (checked on Nov 22 fills). Only when it names nothing do we work the side out.
+  const team = meta.team?.safeName || meta.team?.name || meta.outcome;
   return {
     id: `fill_${x.id}`, orderId: order.id, t: order.insertTime || x.createTime || x.updateTime,
     mkt: order.marketSlug || meta.slug, action: isBuy ? 'bought' : 'sold',
-    title: isShort ? otherSide(meta.title, longTeam) : longTeam, sub: meta.title, evSlug: meta.eventSlug,
+    title: team || meta.title, sub: meta.title, evSlug: meta.eventSlug,
     shares, price: isShort ? 1 - pxLong : pxLong, pnl: n(x.realizedPnl), feeCum: n(order.commissionNotionalTotalCollected),
   };
 }

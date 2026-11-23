@@ -4,6 +4,7 @@ import { Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from '.
 import { recordKelly, stakeFor } from '../src/fairvalue.ts';
 import { returnStats } from '../src/ready.ts';
 import { gradeSports, type SportsMark } from '../src/sportsgrade.ts';
+import { parseFill } from '../src/polymarket.ts';
 
 test('order book depth mid: the average price of the first bitcoin on each side', () => {
   const b = new Book();
@@ -106,4 +107,17 @@ test('pruning keeps the top of the book', () => {
   b.prune(60005);
   assert.deepEqual([...b.bids.keys()], [60000]);
   assert.deepEqual([...b.asks.keys()], [60010]);
+});
+
+test('a short buy is shown as the team actually bought', () => {
+  const f = parseFill({ type: 'ACTIVITY_TYPE_TRADE', trade: { id: 'T1', aggressorExecution: { lastPx: '0.87', lastShares: '106.61', order: {
+    id: 'O1', marketSlug: 'aec-nba-det-atl-2026-11-22', intent: 'ORDER_INTENT_BUY_SHORT',
+    marketMetadata: { title: 'DET Pistons vs. ATL Hawks', outcome: 'Hawks', team: { safeName: 'Hawks', name: 'Atlanta Hawks' } } } } } })!;
+  assert.equal(f.title, 'Hawks');
+  assert.equal(f.action, 'bought');
+  assert.ok(Math.abs(f.price - 0.13) < 1e-9);
+  const g = parseFill({ type: 'ACTIVITY_TYPE_TRADE', trade: { id: 'T2', aggressorExecution: { lastPx: '0.535', lastShares: '44.74', order: {
+    id: 'O2', marketSlug: 'aec-nfl-bal-car-2026-11-22', intent: 'ORDER_INTENT_BUY_LONG',
+    marketMetadata: { title: 'BAL Ravens vs. CAR Panthers', outcome: 'Ravens', team: { safeName: 'BAL Ravens' } } } } } })!;
+  assert.equal(g.title, 'BAL Ravens');
 });
