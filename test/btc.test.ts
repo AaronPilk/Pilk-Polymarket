@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DEFAULT_BLEND, blendProb, eventFor, gradeModel, nextEvent, parseWindow, fairUp, logLoss, learnOffset, selectCheckpoints, windowSlug, type Mark } from '../src/cryptomath.ts';
+import { DEFAULT_BLEND, blendProb, eventFor, fitBlend, gradeModel, nextEvent, parseWindow, fairUp, logLoss, learnOffset, selectCheckpoints, windowSlug, type Mark } from '../src/cryptomath.ts';
 import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale } from '../src/fairvalue.ts';
 
 test('parseWindow reads series, start and end', () => {
@@ -227,4 +227,12 @@ test('the Sports bot counts different games instead of grading math', async () =
   const many = readiness(rows, 100, null, { kind: 'sports', games: 40 });
   assert.equal(many.ok.math, true);
   assert.equal(many.ready, true, JSON.stringify(many.ok));
+});
+
+test('fitBlend keeps the intercept at 0 even when the sample runs one way', () => {
+  // 200 windows where Up wins 70% of the time while math and market both say 50%: a free fit would
+  // learn a ~0.85 intercept and lean Up everywhere.
+  const pts = Array.from({ length: 200 }, (_, i) => ({ x: 0, z: (i % 5) / 10 - 0.2, y: i % 10 < 7 ? 1 : 0, w: 1 }));
+  const bl = fitBlend(pts);
+  assert.ok(Math.abs(bl.a) < 1e-3, `intercept ${bl.a}`);
 });

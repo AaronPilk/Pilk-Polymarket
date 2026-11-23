@@ -184,7 +184,11 @@ export function fitBlend(pts: Array<{ x: number; z: number; y: number; w: number
     const s2 = pr * (1 - pr) * p.w;
     curv[0] += s2; curv[1] += s2 * p.x * p.x; curv[2] += s2 * p.z * p.z;
   }
-  const lam = curv.map((c) => Math.max(1e-3, (prior / W) * c));
+  // No intercept: Up and Down (or the two teams) are symmetric, so a few hours that happen to run one
+  // way must not teach the bot to lean that way on every window. At 73 windows on Nov 22 the free fit
+  // put it at +0.28, enough to make every Up bet look 7 points cheap at 50¢. A very strong prior pins
+  // it at 0; only the weights on the math and the market are learned.
+  const lam = curv.map((c, i) => (i === 0 ? 1e6 : Math.max(1e-3, (prior / W) * c)));
   let th = [...p0];
   for (let it = 0; it < 30; it++) {
     const g = th.map((t, i) => lam[i] * (t - p0[i]));
