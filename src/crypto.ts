@@ -241,6 +241,17 @@ const r4 = (x: number) => Math.round(x * 10_000) / 10_000;
 const leftText = (tau: number) => `${Math.floor(tau / 60)}:${pad(Math.floor(tau % 60))} left`;
 const isOpen = (state: string | null) => !state || /OPEN/.test(state);
 
+// A WebSocket upgrade with an 8 s limit on the handshake only. Passing AbortSignal.timeout(8_000) to
+// the fetch also closed the socket itself 8 s later: every stream (Polymarket, Coinbase, Gemini and
+// the three books) reconnected every 10 s and the bot heard no prices for 1-2 s each time (found
+// Nov 23 with the per-second record). The timer is cleared once the upgrade answers.
+async function upgrade(url: string, headers: Record<string, string>): Promise<Response> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 8_000);
+  try { return await fetch(url, { headers: { ...headers, Upgrade: 'websocket' }, signal: ac.signal }); }
+  finally { clearTimeout(timer); }
+}
+
 export class CryptoFeed extends DurableObject<CryptoEnv> {
   // Spot: the latest price, 1-second samples (strike and end averages, last 10 minutes), and
   // 5-second samples (volatility, last 2 hours).
@@ -567,7 +578,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
 
   private async connectBook(f: BookFeed, now: number) {
     const spec = BOOK_FEEDS[f];
-    const res = await fetch(spec.url, { headers: { ...UA, Upgrade: 'websocket' }, signal: AbortSignal.timeout(8_000) });
+    const res = await upgrade(spec.url, { ...UA });
     const ws = res.webSocket;
     if (!ws) throw new Error(`refused: HTTP ${res.status}`);
     ws.accept();
@@ -642,7 +653,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   // Polymarket's market-data stream. A new window means a new subscription: open the new
   // connection first, then close the old one, so there's no gap.
   private async connectPm(slugs: string[], now: number) {
-    const res = await fetch(PM_API + PM_WS_PATH, { headers: { ...(await signedHeaders(this.env as PmEnv, 'GET', PM_WS_PATH)), Upgrade: 'websocket' }, signal: AbortSignal.timeout(8_000) });
+    const res = await upgrade(PM_API + PM_WS_PATH, { ...(await signedHeaders(this.env as PmEnv, 'GET', PM_WS_PATH)) });
     const ws = res.webSocket;
     if (!ws) throw new Error(`stream refused: HTTP ${res.status}`);
     ws.accept();
@@ -678,7 +689,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   // Coinbase's public ticker: the bitcoin mid on every trade. Each update also re-checks the open
   // windows, since a bitcoin move is exactly when the market's price goes stale.
   private async connectCb(now: number) {
-    const res = await fetch(CB_WS, { headers: { ...UA, Upgrade: 'websocket' }, signal: AbortSignal.timeout(8_000) });
+    const res = await upgrade(CB_WS, { ...UA });
     const ws = res.webSocket;
     if (!ws) throw new Error(`ticker refused: HTTP ${res.status}`);
     ws.accept();
@@ -711,7 +722,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   // Gemini's top of book: each message moves the best bid or ask. The second exchange in the bot's
   // price, and the steady one (Coinbase's ticker only speaks on trades, and goes quiet).
   private async connectGm(now: number) {
-    const res = await fetch(GM_WS, { headers: { ...UA, Upgrade: 'websocket' }, signal: AbortSignal.timeout(8_000) });
+    const res = await upgrade(GM_WS, { ...UA });
     const ws = res.webSocket;
     if (!ws) throw new Error(`gemini refused: HTTP ${res.status}`);
     ws.accept();
