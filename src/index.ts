@@ -3,7 +3,7 @@ import { recordMarkets, settleMarkets } from './recorder';
 import { bankroll } from './paper';
 import { RISK_LADDER, drawdownScale, riskLimits } from './fairvalue';
 import { readiness, type ReadyRow } from './ready';
-import { RULES, board } from './research';
+import { RULES, board, AT_SIZE_SQL } from './research';
 import { nextEvent } from './cryptomath';
 import { gradeSports, type SportsMark } from './sportsgrade';
 export { LiveFeed } from './live';
@@ -162,8 +162,7 @@ async function state(env: Env) {
 // retired strategies stop betting, testing ones bet one contract, promising and proven bet normally.
 async function researchBoards(env: Env) {
   for (const book of ['btc', 'sports'] as const) {
-    const { results } = await env.DB.prepare(`SELECT strategy, pnl, cost, closed_at / 3600000 AS hr, market_slug AS game FROM bot_positions
-      WHERE mode = 'paper' AND status != 'open' AND strategy LIKE ? AND COALESCE(json_extract(meta, '$.rules'), 0) >= ?`)
+    const { results } = await env.DB.prepare(AT_SIZE_SQL)
       .bind(BOOKS[book], RULES).all<{ strategy: string; pnl: number | null; cost: number | null; hr: number; game: string }>();
     const by = new Map<string, ReadyRow[]>();
     for (const r of results) {

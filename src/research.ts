@@ -5,12 +5,16 @@
 //              It stops betting.
 //   testing    not enough bets to judge, or no clear answer yet. One contract a bet, so a test costs
 //              pennies while it gathers data.
-//   promising  ahead by more than one standard error. Bets its normal size.
+//   promising  ahead even in its worst case (mean minus 1.64 standard errors above zero), the mirror of
+//              the retire rule. Bets its normal size. The board looks every 5 minutes, and a bar as low
+//              as one standard error is one a strategy with no edge clears by luck often enough to bet
+//              real money on a streak; at 1.64 that mostly stops.
 //   proven     ahead by two standard errors over enough bets (the readiness card's bar). Normal size,
 //              and it can size up on its own record.
 // The top three are the proven and promising strategies with the best worst case (mean minus one
 // standard error, as a return per dollar bet).
 import { returnStats, type ReadyRow } from './ready';
+import { TAKER_COEF } from './fairvalue';
 
 // Positions opened under the rules this board judges carry meta.rules >= RULES. Bump it when the
 // rules change enough that older bets no longer say anything about the new ones.
@@ -21,13 +25,28 @@ export const LAB: Record<Book, { judge: number; groups: number; proven: number }
   btc: { judge: 30, groups: 6, proven: 200 },       // groups: hours
   sports: { judge: 30, groups: 8, proven: 100 },    // groups: games
 };
-const RETIRE_Z = 1.64;   // best case = mean + 1.64 standard errors (95% one-sided)
+const Z = 1.64;   // best case = mean + 1.64 standard errors, worst case = mean - 1.64 (95% one-sided)
 
 // Retired on the evidence of Nov 22, before the board existed.
 export const RETIRED: Record<string, string> = {
   crypto_fade_v1: 'Bets against price moves the math doesn’t back, but the market leads the math: 7 of 22 up, −23% a dollar on Nov 22.',
   crypto_late_v1: 'Only bets the last two minutes, where the market beats the math: bets with under 4 minutes left lost $176 on Nov 22.',
 };
+
+// The closed bets a strategy is judged on, with fees priced at full size. Polymarket rounds each
+// fill's fee to the cent, so a one-contract test pays up to 30% more or less than the formula (and
+// nothing at all under about 5 cents). A strategy is promoted to bet real size, so it's judged on the
+// exact fee the same bets pay at size, not on a rounding quirk that goes away once it sizes up. Maker
+// fills pay nothing either way. Binds: strategy LIKE pattern, RULES.
+const EXACT = `${TAKER_COEF} * o.filled_qty * COALESCE(o.avg_fill, o.price) * (1 - COALESCE(o.avg_fill, o.price))`;
+const TAKER = `o.order_type IN ('market', 'ioc')`;
+export const AT_SIZE_SQL = `SELECT p.strategy, p.closed_at / 3600000 AS hr, p.market_slug AS game,
+    p.pnl + p.fees - COALESCE(SUM(CASE WHEN ${TAKER} THEN ${EXACT} END), 0) AS pnl,
+    p.cost - COALESCE(SUM(CASE WHEN o.action = 'buy' THEN o.fee END), 0)
+      + COALESCE(SUM(CASE WHEN o.action = 'buy' AND ${TAKER} THEN ${EXACT} END), 0) AS cost
+  FROM bot_positions p LEFT JOIN bot_orders o ON o.position_id = p.id AND o.filled_qty > 0
+  WHERE p.mode = 'paper' AND p.status != 'open' AND p.strategy LIKE ? AND COALESCE(json_extract(p.meta, '$.rules'), 0) >= ?
+  GROUP BY p.id`;
 
 export interface Verdict {
   status: Status; reason: string;
@@ -52,14 +71,14 @@ export function judge(id: string, rows: ReadyRow[], book: Book): Verdict {
     return { ...base, status: 'testing', reason: `Testing with one contract a bet: ${more}.` };
   }
   const t = s.mean / s.se, line = `${pct(s.mean)} a dollar over ${s.n} bets`;
-  if (s.mean + RETIRE_Z * s.se < 0) {
-    return { ...base, status: 'retired', reason: `Losing beyond luck: ${line}, best case ${pct(s.mean + RETIRE_Z * s.se)}.` };
+  if (s.mean + Z * s.se < 0) {
+    return { ...base, status: 'retired', reason: `Losing beyond luck: ${line}, best case ${pct(s.mean + Z * s.se)}.` };
   }
   if (s.n >= lab.judge * 3 && t < 0.5) {
     return { ...base, status: 'retired', reason: `Nothing to show after ${s.n} bets: ${pct(s.mean)} a dollar (t ${t.toFixed(1)}). Fees for no edge.` };
   }
   if (s.n >= lab.proven && t >= 2 && s.pnl > 0) return { ...base, status: 'proven', reason: `Ahead beyond luck: ${line} (t ${t.toFixed(1)}).` };
-  if (t >= 1 && s.pnl > 0) return { ...base, status: 'promising', reason: `Ahead by more than its noise: ${line} (t ${t.toFixed(1)}). Bets its normal size.` };
+  if (s.mean - Z * s.se > 0 && s.pnl > 0) return { ...base, status: 'promising', reason: `Ahead even in its worst case: ${line}, worst case ${pct(s.mean - Z * s.se)}. Bets its normal size.` };
   return { ...base, status: 'testing', reason: `No clear answer yet: ${line} (t ${t.toFixed(1)}). Still one contract a bet.` };
 }
 

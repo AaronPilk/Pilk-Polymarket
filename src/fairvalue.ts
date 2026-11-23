@@ -108,8 +108,10 @@ export function isBlowout(league: string, lead: number, period: number | null, c
   return (left <= 0.5 && deficit >= 15) || (minsLeft <= lateMins && deficit >= 10);
 }
 
-// Taker fee: coefficient x contracts x p x (1 - p), rounded to the cent per order.
-export function takerFee(qty: number, price: number, coef = 0.095): number {
+// Taker fee: coefficient x contracts x p x (1 - p), rounded to the cent per fill (Polymarket US
+// rounds every fee to the nearest cent). TAKER_COEF is the app's Tier 1 rate.
+export const TAKER_COEF = 0.095;
+export function takerFee(qty: number, price: number, coef = TAKER_COEF): number {
   return Math.round(coef * qty * price * (1 - price) * 100) / 100;
 }
 

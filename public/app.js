@@ -885,8 +885,9 @@ function researchCard(lab) {
   const top = (lab.top || []).filter((id) => STRATEGY_LABEL[id]).map((id) => esc(variantOf(id)));
   const count = (k) => rows.filter(([, v]) => v.status === k).length;
   return `<div class="card">
-    <div class="row"><div class="row-main"><div class="row-title">Top 3 so far</div><div class="row-sub">${top.length ? top.join(' · ') : 'Nothing has earned it yet. A strategy needs 30 bets on the new rules and to be ahead by more than its noise.'}</div></div><div class="row-end dim">${count('proven')} proven · ${count('promising')} promising · ${count('testing')} testing · ${count('retired')} retired</div></div>
+    <div class="row"><div class="row-main"><div class="row-title">Top 3 so far</div><div class="row-sub">${top.length ? top.join(' · ') : 'Nothing has earned it yet. A strategy needs 30 bets on the new rules and to be ahead even in its worst case.'}</div></div><div class="row-end dim">${count('proven')} proven · ${count('promising')} promising · ${count('testing')} testing · ${count('retired')} retired</div></div>
     ${rows.map(([id, v]) => `<div class="row"><div class="row-main"><div class="row-title">${esc(variantOf(id))} <span class="pill ${STATUS_PILL[v.status]?.[0] || ''}">${STATUS_PILL[v.status]?.[1] || esc(v.status)}</span></div><div class="row-sub">${esc(v.reason || '')}</div></div><div class="row-end"><div class="row-amt ${tone(v.pnl || 0)}">${v.n ? money(v.pnl || 0, { sign: true }) : '–'}</div></div></div>`).join('')}
+    <div class="row-sub wrap pad">Judged on the fee each bet would pay at full size. Polymarket rounds fees to the cent, so a 1-contract test can pay 30% more or less than the real rate, and that goes away once a strategy bets bigger.</div>
   </div>`;
 }
 

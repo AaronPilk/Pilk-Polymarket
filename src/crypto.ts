@@ -59,7 +59,7 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import { DEFAULT_BLEND, SCORE_POINTS, bandOf, blendProb, eventFor, fairUp, gradeModel, learnOffset, parseWindow, windowEnd, windowSlug, type Band, type Blend, type Mark } from './cryptomath';
-import { RULES, statusOf, type Status } from './research';
+import { RULES, statusOf, type Status, AT_SIZE_SQL } from './research';
 import { dailyStopHit, drawdownScale, recordKelly, riskLimits, stakeFor } from './fairvalue';
 import { Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
 import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
@@ -1612,8 +1612,8 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       .bind('btc_model', JSON.stringify({ ...g, mult: this.mult, active: this.blends, ready: g.bands.early.windows >= 100 && g.bands.late.windows >= 100, need: 100 }), now).run();
     // Each strategy's own record on the current rules: what it has shown per dollar bet, as a Kelly
     // share it may size on (fairvalue.ts recordKelly).
-    const rows = (await this.env.DB.prepare(`SELECT strategy, pnl, cost, closed_at / 3600000 AS hr FROM bot_positions
-      WHERE mode = 'paper' AND status != 'open' AND strategy LIKE 'crypto_%' AND COALESCE(json_extract(meta, '$.rules'), 0) >= ${RULES}`)
+    // Fees priced at full size, like the research board (research.ts AT_SIZE_SQL).
+    const rows = (await this.env.DB.prepare(AT_SIZE_SQL).bind('crypto_%', RULES)
       .all<{ strategy: string; pnl: number; cost: number; hr: number }>()).results;
     const by = new Map<string, Array<{ pnl: number; cost: number; group: number }>>();
     for (const r of rows) { const a = by.get(r.strategy) || []; a.push({ pnl: r.pnl, cost: r.cost, group: r.hr }); by.set(r.strategy, a); }
