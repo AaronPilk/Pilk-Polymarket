@@ -5,7 +5,7 @@ const store = {
   activities: [],
   state: null,     // { snapshot, lastSync, apiConfigured }
   bot: null,      // /api/bot: the bot's own ledger
-  botRange: 'all', // bot chart: 1h | 1d | 1w | all
+  botRange: 'run', // bot chart: run (bets on the current rules) | 1h | 1d | 1w | all
   botBook: (() => { try { return localStorage.getItem('pm-bot-book') === 'sports' ? 'sports' : 'btc'; } catch { return 'btc'; } })(), // btc | sports: two bots, two books
   botGroup: 'btc', // live | btc | hoops
   botGroupSet: false,
@@ -521,7 +521,7 @@ const groupOf = (s) => (s?.startsWith('crypto_') ? 'btc' : s?.startsWith('hoops_
 const GROUP_LABEL = { live: 'Real money', btc: 'Paper · Bitcoin', hoops: 'Paper · Basketball' };
 const BOOK_LABEL = { btc: 'Bitcoin bot', sports: 'Sports bot' };
 const BOOK_GROUP = { btc: 'btc', sports: 'hoops' };
-const BOT_RANGE_LABEL = { '1h': 'Last hour', '1d': 'Last 24 hours', '1w': 'Last 7 days', all: 'Since it started' };
+const BOT_RANGE_LABEL = { run: 'This run, on the new rules', '1h': 'Last hour', '1d': 'Last 24 hours', '1w': 'Last 7 days', all: 'Since it started' };
 const iconBadge = ([bg, fg, path]) => `<span class="badge" style="background:${bg};color:${fg}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${path}</svg></span>`;
 const signalBadge = (kind) => iconBadge(SIGNAL_ICON[kind] || SIGNAL_ICON.swing);
 
@@ -580,7 +580,7 @@ function renderBot() {
       <div class="chart-wrap" id="bot-chart"></div>
       <div class="chart-axis" id="bot-axis"></div>
       <div class="segmented" id="bot-range" role="tablist" aria-label="Chart range"><div class="thumb"></div>
-        <button data-range="1h" role="tab">1H</button><button data-range="1d" role="tab">1D</button><button data-range="1w" role="tab">1W</button><button data-range="all" role="tab">All</button>
+        <button data-range="run" role="tab">Run</button><button data-range="1h" role="tab">1H</button><button data-range="1d" role="tab">1D</button><button data-range="1w" role="tab">1W</button><button data-range="all" role="tab">All</button>
       </div>
       <div id="bot-rest"></div>`;
     botBuilt = true;
@@ -657,7 +657,9 @@ function botSeries() {
   const ys = c[g] || [], ns = c.n?.[g] || [];
   const pts = [{ t: c.from, y: 0, n: 0 }];
   for (let i = 0; i < c.t.length; i++) pts.push({ t: c.t[i], y: ys[i] ?? 0, n: ns[i] ?? 0 });
-  const positions = live ? b.live?.positions || [] : (b.positions || []).filter((p) => g === 'all' || groupOf(p.strategy) === g);
+  const onRules = (p) => { try { return (JSON.parse(p.meta || '{}').rules || 0) >= (b.rules || 0); } catch { return false; } };
+  const positions = (live ? b.live?.positions || [] : (b.positions || []).filter((p) => g === 'all' || groupOf(p.strategy) === g))
+    .filter((p) => store.botRange !== 'run' || onRules(p));
   const open = positions.reduce((s, p) => s + (p.upnl || 0), 0);
   const now = Math.max(Date.now(), c.to);
   pts.push({ t: now, y: pts.at(-1).y + open, n: 0, now: true });
@@ -689,7 +691,13 @@ function paintBotHero() {
   if (!live && paperCap > 0) parts.push(`<span><b class="${tone(v)}">${signedPct(v / paperCap)}</b> of ${money(paperCap, { cents: false })} paper (${nAcc} accounts × ${money(b.allocation, { cents: false })})</span>`);
   // Fees so far, as a share of the money bet, and what the same trades would cost through the API
   // (flat 0.0695 with 70% rebated, Nov 21 to Dec 31, 2026) against paper's full 0.095.
-  if (!live && b.staked > 0 && b.fees > 0) parts.push(`<span>Fees <b>${money(b.fees)}</b> (${pct(b.fees / b.staked, 1)} of ${money(b.staked, { cents: false })} bet), about ${money(b.fees * API_FEE_SHARE)} through the API</span>`);
+  const onRun = store.botRange === 'run' && b.run;
+  const fees = onRun ? b.run.fees || 0 : b.fees, staked = onRun ? b.run.staked || 0 : b.staked;
+  if (!live && staked > 0 && fees > 0) parts.push(`<span>Fees <b>${money(fees)}</b> (${pct(fees / staked, 1)} of ${money(staked, { cents: false })} bet), about ${money(fees * API_FEE_SHARE)} through the API</span>`);
+  if (!live && onRun) {
+    const allTime = (b.realized || 0) + (b.unrealized || 0);
+    parts.push(`<span>All-time <b class="${tone(allTime)}">${money(allTime, { sign: true })}</b>, retired tests included</span>`);
+  }
   if (S) {
     const n = S.wins + S.losses;
     parts.push(n ? `<span><b>${S.wins}–${S.losses}</b> on ${n} closed</span>` : '<span>Nothing closed in this range</span>');
@@ -789,13 +797,15 @@ const clock = (ms) => new Date(ms).toLocaleString([], { weekday: 'short', month:
 function learnRows(m) {
   const b = m?.basis, n = Math.max(b?.n?.cb || 0, b?.n?.gm || 0);
   const reads = (name, v) => (v == null || Math.abs(v) < 0.005 ? `${name} on the index` : `${name} reads ${money(Math.abs(v))} ${v < 0 ? 'high' : 'low'}`);
-  const bl = m?.active || { a: 0, b: 0.5, c: 0.5 };
-  const w = bl.b + bl.c > 0 ? bl.b / (bl.b + bl.c) : 0.5;
-  const fitted = (m?.windows || 0) >= 100 && !!m?.blendNext;
+  const act = m?.active || {}, start = { a: 0, b: 0.5, c: 0.5 };
+  const eBl = act.early || start, lBl = act.late || (act.b != null ? act : start);
+  const wOf = (x) => (x.b + x.c > 0 ? x.b / (x.b + x.c) : 0.5);
+  const eN = m?.bands?.early?.windows || 0, lN = m?.bands?.late?.windows || 0;
+  const bandLine = (name, x, n) => `${name}: ${n >= 100 ? `fitted from ${n} windows, ${pct(wOf(x))} math` : `starting at 50/50, fits at 100 windows (${n} so far)`}`;
   const pz = m?.paused || {}, ev = m?.nextEvent;
   const held = (pz.feeds || 0) + (pz.jumps || 0) + (pz.news || 0);
   return `<div class="learn">
-    <div class="learn-row"><span>Math vs market</span><b>${pct(w)} math · ${pct(1 - w)} market</b><small>${fitted ? 'Fitted from the graded windows. Every bet is sized on this blend, so the more the math earns its keep, the bigger it bets.' : `Starting at 50/50. The grading fits the real weights at 100 windows (${m?.windows || 0} so far). Every bet is sized on this blend.`}</small></div>
+    <div class="learn-row"><span>Math vs market</span><b>4+ min left ${pct(wOf(eBl))} math · last 4 min ${pct(wOf(lBl))} math</b><small>Learned separately, because late in a window the market makers' price is faster than ours. ${bandLine('4+ minutes left', eBl, eN)}; ${bandLine('last 4 minutes', lBl, lN)}. Every bet is sized and fee-checked on its band's blend.</small></div>
     <div class="learn-row"><span>Price check</span><b>${n ? `${reads('Coinbase', b.cb)} · ${reads('Gemini', b.gm)}` : 'Learning'}</b><small>${n ? `Lined up against ${n} official start prices; the bot shifts each feed onto the index.` : 'Each window start, Polymarket publishes the official price; the bot learns each exchange’s offset from it.'}</small></div>
     <div class="learn-row"><span>Fee check</span><b>${Number(m?.feeSkips || 0).toLocaleString()} skipped</b><small>Trades the math flagged where the bot's real estimate (math and market, weighed the way the grading has learned) didn't beat the price after the fee. Fees run 0.095 × price × (1 − price) per contract each way, so a buy and an early sell near 30–50¢ costs about 10% of the bet.</small></div>
     <div class="learn-row"><span>Data check</span><b>${Number(m?.skips || 0).toLocaleString()} skipped</b><small>Trades where the math and the market were more than 15 points apart. That big a gap is almost always our data, not a gift.</small></div>
@@ -866,6 +876,20 @@ function exitCard(x) {
 
 // Head to head: both bots on the same rules. Return on money bet is the fair yardstick, since the
 // Bitcoin bot places far more (and smaller) bets than the Sports bot.
+const STATUS_PILL = { proven: ['won', 'Proven'], promising: ['open', 'Promising'], testing: ['', 'Testing'], retired: ['lost', 'Retired'] };
+function researchCard(lab) {
+  if (!lab?.strategies) return '<div class="card pad">Every 5 minutes the board judges each strategy on its bets under the new rules: losers retire, winners bet more. First verdicts in a few minutes.</div>';
+  const order = { proven: 0, promising: 1, testing: 2, retired: 3 };
+  const rows = Object.entries(lab.strategies).filter(([id]) => STRATEGY_LABEL[id])
+    .sort((x, y) => order[x[1].status] - order[y[1].status] || (y[1].low ?? -9) - (x[1].low ?? -9) || (y[1].n || 0) - (x[1].n || 0));
+  const top = (lab.top || []).filter((id) => STRATEGY_LABEL[id]).map((id) => esc(variantOf(id)));
+  const count = (k) => rows.filter(([, v]) => v.status === k).length;
+  return `<div class="card">
+    <div class="row"><div class="row-main"><div class="row-title">Top 3 so far</div><div class="row-sub">${top.length ? top.join(' · ') : 'Nothing has earned it yet. A strategy needs 30 bets on the new rules and to be ahead by more than its noise.'}</div></div><div class="row-end dim">${count('proven')} proven · ${count('promising')} promising · ${count('testing')} testing · ${count('retired')} retired</div></div>
+    ${rows.map(([id, v]) => `<div class="row"><div class="row-main"><div class="row-title">${esc(variantOf(id))} <span class="pill ${STATUS_PILL[v.status]?.[0] || ''}">${STATUS_PILL[v.status]?.[1] || esc(v.status)}</span></div><div class="row-sub">${esc(v.reason || '')}</div></div><div class="row-end"><div class="row-amt ${tone(v.pnl || 0)}">${v.n ? money(v.pnl || 0, { sign: true }) : '–'}</div></div></div>`).join('')}
+  </div>`;
+}
+
 function compareCard(c) {
   if (!c || !c.btc || !c.sports) return '';
   const col = (k, name) => {
@@ -998,6 +1022,11 @@ function botRest(b) {
 
   return `
     ${showLive ? liveSection(L) : ''}
+
+    <div class="section">
+      <div class="section-title">Research board<small>judged every 5 minutes on the new rules</small></div>
+      ${researchCard(b.lab)}
+    </div>
 
     <div class="section">
       <div class="section-title">Head to head<small>paper, same rules</small></div>

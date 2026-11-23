@@ -2,11 +2,14 @@ import { aggregateOrder, isApiFill, normalize, parseFill, pm, type Fill, type Pm
 import { recordMarkets, settleMarkets } from './recorder';
 import { bankroll } from './paper';
 import { RISK_LADDER, drawdownScale, riskLimits } from './fairvalue';
-import { readiness } from './ready';
+import { readiness, type ReadyRow } from './ready';
+import { RULES, board } from './research';
 import { nextEvent } from './cryptomath';
 import { gradeSports, type SportsMark } from './sportsgrade';
 export { LiveFeed } from './live';
 export { CryptoFeed } from './crypto';
+import { HOOPS_IDS } from './live';
+import { CRYPTO_IDS } from './crypto';
 
 interface Env extends PmEnv {
   DB: D1Database;
@@ -82,6 +85,8 @@ export default {
         try { await recordMarkets(env, now, fullTick); }
         catch (e: any) { if (fullTick) await logSync(env, false, 0, `recorder: ${e?.message || e}`); }
       }
+      // Every 5 minutes: the research board for each bot (retire losers, rank what works).
+      if (now.getUTCMinutes() % 5 === 0) await researchBoards(env).catch((e) => console.log('research board error', String(e?.message || e)));
       if (!fullTick) return;
       if (sports) {
         try { await settleMarkets(env, now); }
@@ -152,6 +157,26 @@ async function state(env: Env) {
 }
 
 // The Sports bot's math vs the market on finished games (sportsgrade.ts), saved for the app.
+// The research board (research.ts): every strategy judged on its bets under the current rules, as a
+// return per dollar with hours (bitcoin) or games (sports) as the unit. The bots read the verdicts:
+// retired strategies stop betting, testing ones bet one contract, promising and proven bet normally.
+async function researchBoards(env: Env) {
+  for (const book of ['btc', 'sports'] as const) {
+    const { results } = await env.DB.prepare(`SELECT strategy, pnl, cost, closed_at / 3600000 AS hr, market_slug AS game FROM bot_positions
+      WHERE mode = 'paper' AND status != 'open' AND strategy LIKE ? AND COALESCE(json_extract(meta, '$.rules'), 0) >= ?`)
+      .bind(BOOKS[book], RULES).all<{ strategy: string; pnl: number | null; cost: number | null; hr: number; game: string }>();
+    const by = new Map<string, ReadyRow[]>();
+    for (const r of results) {
+      const a = by.get(r.strategy) || [];
+      a.push({ pnl: r.pnl, cost: r.cost, group: book === 'btc' ? r.hr : r.game });
+      by.set(r.strategy, a);
+    }
+    const b = board(by, book === 'btc' ? CRYPTO_IDS : HOOPS_IDS, book);
+    await env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
+      .bind(`lab_${book}`, JSON.stringify(b), Date.now()).run();
+  }
+}
+
 async function gradeSportsBook(env: Env) {
   const { results } = await env.DB.prepare(`SELECT h.slug, h.point AS target, h.fair, h.bid, h.ask, m.result, m.league
     FROM hoops_marks h JOIN markets m ON m.slug = h.slug WHERE m.result IS NOT NULL`).all<SportsMark>();
@@ -308,8 +333,14 @@ async function bot(env: Env, book: Book) {
     };
   }
 
+  // The research board for this bot (written every 5 minutes) and its total under the current rules.
+  const labRow = await env.DB.prepare('SELECT v, at FROM brain WHERE k = ?').bind(`lab_${book}`).first<{ v: string; at: number }>().catch(() => null);
+  let lab = null;
+  try { lab = labRow ? { ...JSON.parse(labRow.v), at: labRow.at } : null; } catch { lab = null; }
+  const run = (await q<{ n: number; pnl: number | null; staked: number | null; fees: number | null }>(`SELECT COUNT(*) AS n, SUM(pnl) AS pnl, SUM(cost) AS staked, SUM(fees) AS fees
+    FROM bot_positions WHERE mode = 'paper' AND status != 'open'${scope} AND COALESCE(json_extract(meta, '$.rules'), 0) >= ?`, RULES))[0] || null;
   return {
-    book, books: Object.keys(BOOKS), mode: liveOn ? 'live' : 'paper', allocation, sports,
+    book, books: Object.keys(BOOKS), mode: liveOn ? 'live' : 'paper', allocation, sports, rules: RULES, lab, run,
     model, live, ready, risk, compare, exits, records,
     // This bot's paper accounts
     ...paper, signals, byStrategy,
@@ -325,10 +356,12 @@ const groupOf = (strategy: string | null) => (strategy?.startsWith('crypto_') ? 
 async function botCurve(env: Env, range: string, mode: 'paper' | 'live') {
   const now = Date.now();
   let from = SPANS[range] ? now - SPANS[range] : 0;
-  const rows = (await env.DB.prepare("SELECT closed_at AS t, pnl, strategy FROM bot_positions WHERE mode = ? AND status != 'open' AND closed_at >= ? ORDER BY closed_at")
+  // "run": only bets placed under the current rules (the research board's run), from its first bet.
+  const onRules = range === 'run' ? ` AND COALESCE(json_extract(meta, '$.rules'), 0) >= ${RULES}` : '';
+  const rows = (await env.DB.prepare(`SELECT closed_at AS t, pnl, strategy FROM bot_positions WHERE mode = ? AND status != 'open' AND closed_at >= ?${onRules} ORDER BY closed_at`)
     .bind(mode, from).all<{ t: number; pnl: number | null; strategy: string | null }>()).results;
   if (!SPANS[range]) {
-    const first = await env.DB.prepare('SELECT MIN(opened_at) AS t FROM bot_positions WHERE mode = ?').bind(mode).first<{ t: number | null }>();
+    const first = await env.DB.prepare(`SELECT MIN(opened_at) AS t FROM bot_positions WHERE mode = ?${onRules}`).bind(mode).first<{ t: number | null }>();
     from = Math.min(first?.t ?? now - 3_600_000, now - 3_600_000);
   }
   const N = 120, S = 24;

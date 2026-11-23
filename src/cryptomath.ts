@@ -225,10 +225,24 @@ function tStat(xs: number[]): number | null {
 //                         toward the best only with 100+ windows and t >= 2 (slow, and never on noise)
 //   blend / blendNext     the fitted log-odds weights; blendNext is set once 100+ windows are in
 //   buckets               calibration: when the math said 60-70%, how often did Up happen
+// Late bets (under 4 minutes left) and early ones get their own blend: on Nov 22 the market beat the
+// math late (bets placed with under 4 minutes left lost $176; the price moved against them within
+// 10 s 60% of the time) while early the math held its own (the price moved its way, +2¢ on average).
+export const BAND_SPLIT = 240;
+export type Band = 'early' | 'late';
+export const bandOf = (tau: number): Band => (tau >= BAND_SPLIT ? 'early' : 'late');
+
 export function gradeModel(marks: Mark[], current = 1) {
   const pts = selectCheckpoints(marks);
   const perWindow = new Map<string, number>();
   for (const m of pts) perWindow.set(m.slug, (perWindow.get(m.slug) || 0) + 1);
+  // Each band weighs every window once among its own checkpoints.
+  const perBand = new Map<string, number>();
+  for (const m of pts) { const k = `${bandOf(m.tau)}|${m.slug}`; perBand.set(k, (perBand.get(k) || 0) + 1); }
+  const bandAcc: Record<Band, { fit: Array<{ x: number; z: number; y: number; w: number }>; w: number; model: number; market: number; windows: Set<string> }> = {
+    early: { fit: [], w: 0, model: 0, market: 0, windows: new Set() },
+    late: { fit: [], w: 0, model: 0, market: 0, windows: new Set() },
+  };
   const hourOf = (slug: string) => Math.floor((parseWindow(slug)?.start ?? 0) / 3_600_000);
   const series = new Map<string, { w: number; model: number; market: number }>();
   const buckets = emptyBuckets(), marketBuckets = emptyBuckets();
@@ -256,6 +270,9 @@ export function gradeModel(marks: Mark[], current = 1) {
       wPair += w; model += w * lm; market += w * lk;
       edgeByWindow.set(m.slug, (edgeByWindow.get(m.slug) || 0) + w * (lk - lm));
       fitPts.push({ x: logit(m.fair), z: logit(mid), y, w });
+      const band = bandOf(m.tau), B = bandAcc[band], wb = 1 / (perBand.get(`${band}|${m.slug}`) || 1);
+      B.fit.push({ x: logit(m.fair), z: logit(mid), y, w: wb });
+      B.w += wb; B.model += wb * lm; B.market += wb * lk; B.windows.add(m.slug);
       addBucket(marketBuckets, mid, y, w);
       const s = parseWindow(m.slug)?.series || 'other';
       const row = series.get(s) || { w: 0, model: 0, market: 0 };
@@ -284,13 +301,22 @@ export function gradeModel(marks: Mark[], current = 1) {
   // The log-odds weights.
   const blend = fitPts.length >= 30 ? fitBlend(fitPts) : null;
   const blendNext = blend && windows >= 100 ? blend : null;
+  // ...and per band, each adopted once that band alone has 100 windows.
+  const bands = Object.fromEntries((['early', 'late'] as Band[]).map((k) => {
+    const B = bandAcc[k], n = B.windows.size;
+    const bl = B.fit.length >= 30 ? fitBlend(B.fit) : null;
+    return [k, {
+      windows: n, modelLoss: B.w ? r4(B.model / B.w) : null, marketLoss: B.w ? r4(B.market / B.w) : null,
+      blend: bl && { a: r4(bl.a), b: r4(bl.b), c: r4(bl.c) }, next: bl && n >= 100 ? bl : null,
+    }];
+  })) as Record<Band, { windows: number; modelLoss: number | null; marketLoss: number | null; blend: Blend | null; next: Blend | null }>;
 
   return {
     windows, marks: pts.length,
     modelLoss: wPair ? r4(model / wPair) : null, marketLoss: wPair ? r4(market / wPair) : null, paired: Math.round(wPair),
     edge: { mean: edgeMean == null ? null : r4(edgeMean), t: edgeT == null ? null : Math.round(edgeT * 100) / 100, hours: hourMeans.length, windows: edgeByWindow.size },
     grid: scored, best: SIGMA_GRID[bestI], next, gridT: gridT == null ? null : Math.round(gridT * 100) / 100,
-    blend: blend && { a: r4(blend.a), b: r4(blend.b), c: r4(blend.c) }, blendNext,
+    blend: blend && { a: r4(blend.a), b: r4(blend.b), c: r4(blend.c) }, blendNext, bands,
     bySeries: Object.fromEntries([...series].map(([k, v]) => [k, { windows: Math.round(v.w), model: r4(v.model / v.w), market: r4(v.market / v.w) }])),
     buckets: finishBuckets(buckets), marketBuckets: finishBuckets(marketBuckets),
   };

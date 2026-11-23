@@ -236,3 +236,28 @@ test('fitBlend keeps the intercept at 0 even when the sample runs one way', () =
   const bl = fitBlend(pts);
   assert.ok(Math.abs(bl.a) < 1e-3, `intercept ${bl.a}`);
 });
+
+test('each time-left band learns its own weights: early can trust the math while late trusts the market', () => {
+  const r = rng(23);
+  const noisy = (p: number) => Math.min(0.97, Math.max(0.03, p + (r() - 0.5) * 0.6));
+  const marks: Mark[] = [];
+  for (let w = 0; w < 220; w++) {
+    const p = 0.1 + 0.8 * r();
+    const y = r() < p ? 1 : 0;
+    // 4 minutes left (early band): the math knows. The last checkpoints (late band): the market knows.
+    marks.push({ slug: slugAt(w), tau: 240, fair: p, bid: noisy(p) - 0.01, ask: 0, spot: 60000, strike: 60000, sigma: 5e-5, avgObs: null, result: y });
+    marks[marks.length - 1].ask = marks[marks.length - 1].bid! + 0.02;
+    for (const tau of [150, 60]) marks.push({ slug: slugAt(w), tau, fair: noisy(p), bid: p - 0.01, ask: p + 0.01, spot: 60000, strike: 60000, sigma: 5e-5, avgObs: null, result: y });
+  }
+  const g = gradeModel(marks);
+  assert.equal(g.bands.early.windows, 220);
+  assert.equal(g.bands.late.windows, 220);
+  assert.ok(g.bands.early.blend!.b > g.bands.early.blend!.c, `early ${JSON.stringify(g.bands.early.blend)}`);
+  assert.ok(g.bands.late.blend!.c > g.bands.late.blend!.b, `late ${JSON.stringify(g.bands.late.blend)}`);
+  assert.ok(g.bands.early.next && g.bands.late.next);
+  assert.ok(g.bands.early.modelLoss! < g.bands.early.marketLoss!);
+  assert.ok(g.bands.late.marketLoss! < g.bands.late.modelLoss!);
+  // A band with under 100 windows of its own is not adopted
+  const few = gradeModel(marks.filter((m) => m.tau !== 240 || Number(m.slug.slice(-5, -3)) % 3 === 0));
+  assert.ok(few.bands.early.windows < 100 && few.bands.early.next === null, `${few.bands.early.windows}`);
+});

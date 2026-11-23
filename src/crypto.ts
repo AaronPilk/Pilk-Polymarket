@@ -58,7 +58,8 @@
 //               order errors in a row. Every action lands in live_events for the app.
 
 import { DurableObject } from 'cloudflare:workers';
-import { DEFAULT_BLEND, SCORE_POINTS, blendProb, eventFor, fairUp, gradeModel, learnOffset, parseWindow, windowEnd, windowSlug, type Blend, type Mark } from './cryptomath';
+import { DEFAULT_BLEND, SCORE_POINTS, bandOf, blendProb, eventFor, fairUp, gradeModel, learnOffset, parseWindow, windowEnd, windowSlug, type Band, type Blend, type Mark } from './cryptomath';
+import { RULES, statusOf, type Status } from './research';
 import { dailyStopHit, drawdownScale, recordKelly, riskLimits, stakeFor } from './fairvalue';
 import { Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
 import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
@@ -170,6 +171,7 @@ const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_fade_v1', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0, exitAbove: 0.02, tauMin: 45, live: true, trigger: 'fade' },
 ];
 const BY_ID = new Map(CRYPTO_STRATEGIES.map((s) => [s.id, s]));
+export const CRYPTO_IDS = [...CRYPTO_STRATEGIES.map((s) => s.id), 'crypto_ladder_v1'];
 
 function etParts(ms: number) {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
@@ -262,7 +264,13 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private pending = new Set<string>();
   private evalAt = new Map<string, number>();
   private mult = 1;
-  private blend: Blend = { ...DEFAULT_BLEND }; // how the math and the market are weighed for sizing (learned)
+  // How the math and the market are weighed (learned), one blend for bets with 4+ minutes left and one
+  // for the last 4 minutes; each starts 50/50 and is replaced once its band has 100 graded windows.
+  private blends: Record<Band, Blend> = { early: { ...DEFAULT_BLEND }, late: { ...DEFAULT_BLEND } };
+  // The research board's verdicts (index.ts writes them every 5 minutes): retired strategies stop
+  // betting, testing ones bet one contract.
+  private lab: { strategies?: Record<string, { status?: Status }> } | null = null;
+  private labAt = 0;
   private feedGap: number | null = null;  // how far apart Coinbase and Gemini read right now (both lined up)
   private jumpUntil = 0;                  // entries pause until then after a jump
   private guardAt = new Map<string, number>();
@@ -315,7 +323,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   async fetch(_req: Request): Promise<Response> {
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm == null || alarm > Date.now() + 2 * MIN) await this.ctx.storage.setAlarm(Date.now() + 1_000);
-    return Response.json({ ok: true, alarm, spot: this.spot?.price ?? null, stream: !!this.pm, ticker: !!this.cb, gemini: !!this.gm, mult: this.mult, blend: this.blend, basis: this.basis, tod: this.tod,
+    return Response.json({ ok: true, alarm, spot: this.spot?.price ?? null, stream: !!this.pm, ticker: !!this.cb, gemini: !!this.gm, mult: this.mult, blend: this.blends, lab: this.lab, basis: this.basis, tod: this.tod,
       replica: { price: this.repSec.at(-1)?.[1] ?? null, books: Object.fromEntries(BOOK_IDS.map((x) => [x, { up: !!this.bk[x].conn, at: this.bk[x].book.at, bids: this.bk[x].book.bids.size, asks: this.bk[x].book.asks.size, msgs: this.bk[x].msgs }])), n: this.rep.n } });
   }
 
@@ -341,6 +349,13 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       if (now - this.tunedAt >= TUNE_EVERY) {
         this.tunedAt = now;
         try { await this.tune(now); } catch (e) { console.log('tune error', String((e as any)?.message || e)); }
+      }
+      if (now - this.labAt >= 5 * MIN) {
+        this.labAt = now;
+        try {
+          const lb = await this.env.DB.prepare("SELECT v FROM brain WHERE k = 'lab_btc'").first<{ v: string }>();
+          if (lb) this.lab = JSON.parse(lb.v);
+        } catch (e) { console.log('lab error', String((e as any)?.message || e)); }
       }
       stmts.push(...this.pendingStmts.splice(0));
       for (let i = 0; i < stmts.length; i += 100) await this.env.DB.batch(stmts.slice(i, i + 100));
@@ -369,7 +384,11 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       const b = await this.env.DB.prepare("SELECT v FROM brain WHERE k = 'btc_model'").first<{ v: string }>();
       const saved = b ? JSON.parse(b.v) : null;
       const ab = saved?.active;
-      if (ab && [ab.a, ab.b, ab.c].every((x: unknown) => Number.isFinite(Number(x)))) this.blend = { a: Number(ab.a), b: Number(ab.b), c: Number(ab.c) };
+      const okB = (x: any) => !!x && [x.a, x.b, x.c].every((v: unknown) => Number.isFinite(Number(v)));
+      const toB = (x: any): Blend => ({ a: Number(x.a), b: Number(x.b), c: Number(x.c) });
+      if (okB(ab?.early)) this.blends.early = toB(ab.early);
+      if (okB(ab?.late)) this.blends.late = toB(ab.late);
+      else if (okB(ab)) this.blends.late = toB(ab); // before the bands: the one fitted blend, mostly late checkpoints
       if (saved && Number(saved.mult) > 0) this.mult = Number(saved.mult);
       const tb = await this.env.DB.prepare("SELECT v, at FROM brain WHERE k = 'btc_tod'").first<{ v: string; at: number }>();
       const st = tb ? JSON.parse(tb.v) : null;
@@ -1074,6 +1093,9 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     for (const st of CRYPTO_STRATEGIES) {
       const key = `${st.id}|${w.slug}`;
       if (tau < st.tauMin || tau > (st.tauMax ?? len - 30)) { this.seen.delete(key); continue; }
+      // The research board: a retired strategy no longer bets; a testing one bets one contract.
+      const status = statusOf(this.lab, st.id);
+      if (status === 'retired') { this.seen.delete(key); continue; }
       // Is there room for a paper entry, a live entry, or both?
       const paperMine = this.open.filter((x) => x.status === 'open' && x.mode !== 'live' && x.strategy === st.id);
       const paperFree = !paperMine.some((x) => x.market_slug === w.slug)
@@ -1108,7 +1130,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       if (midSide != null && best.fair - midSide > MAX_GAP) { this.seen.delete(key); this.gapSkip(w, best, midSide, f, tau, now); continue; }
       // The fee check: on the blend (what the bot actually believes), the bet must still beat the
       // price after the fee. With the market the sharper one, this is what stops it paying fees for nothing.
-      if (this.sizingProb(best, mid) - best.ask - feePer(best.ask) < BLEND_EDGE) { this.seen.delete(key); this.guardSkip('fee_skips', w, now); continue; }
+      if (this.sizingProb(best, mid, tau) - best.ask - feePer(best.ask) < BLEND_EDGE) { this.seen.delete(key); this.guardSkip('fee_skips', w, now); continue; }
       // On the stream, the price has to still be there 0.6 s later, like a real order landing.
       if (src === 'stream') {
         const s = this.seen.get(key);
@@ -1121,10 +1143,11 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         const bank = await this.bank(st.id, now);
         if (!dailyStopHit(bank.equity, bank.today, bank.peak)) {
           const stake = stakeFor({
-            fair: this.sizingProb(best, mid), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
+            fair: this.sizingProb(best, mid, tau), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
             fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(), recordKelly: this.records.get(st.id)?.f ?? 0,
           });
           let qty = Math.floor(stake / best.ask);
+          if (status === 'testing') qty = Math.min(qty, 1);
           // A probe: the blend clears the fee but the stake rounds to under one contract. On paper it
           // still buys one, so the strategy keeps learning. It stays inside the ladder: room under the
           // one-bet and all-open limits, and none at the floor.
@@ -1137,7 +1160,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
               strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side,
               sideName: `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`, ask: best.ask, qty, coef: COEF,
               reason: `${probe ? 'probe: ' : ''}fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${leftText(tau)}${src === 'stream' ? ', on stream' : ''}`, now, tpBelow: st.tpBelow,
-              meta: { fair: r4(best.fair), edge: r4(best.edge), mid: midSide == null ? null : r4(midSide), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, blend: this.blend, p: r4(this.sizingProb(best, mid)), record: this.records.get(st.id)?.f ?? 0, probe, feeds: this.feedsNow(now), src, equity: r2(bank.equity) },
+              meta: { fair: r4(best.fair), edge: r4(best.edge), mid: midSide == null ? null : r4(midSide), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), record: this.records.get(st.id)?.f ?? 0, probe, feeds: this.feedsNow(now), src, equity: r2(bank.equity), rules: RULES, status },
             });
             pos.mode = 'paper';
             this.open.push(pos);
@@ -1157,7 +1180,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     const bank = await this.bank('live', now);
     if (dailyStopHit(bank.equity, bank.today, bank.peak)) return;
     const stake = stakeFor({
-      fair: this.sizingProb(best, mid), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
+      fair: this.sizingProb(best, mid, tau), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
       fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(), recordKelly: this.records.get(st.id)?.f ?? 0,
     });
     const qty = Math.floor(stake / best.ask);
@@ -1189,7 +1212,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side, sideName: name,
       qty: r.filled, avgPx: r.avgSidePx, fee: r.fee, limitPx: best.ask, exchangeId: r.id,
       reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${leftText(tau)}`, now,
-      meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, blend: this.blend, p: r4(this.sizingProb(best, mid)), feeds: this.feedsNow(now), equity: r2(bank.equity), asked: qty },
+      meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), feeds: this.feedsNow(now), equity: r2(bank.equity), asked: qty, rules: RULES },
     });
     this.open.push(pos);
     this.bankCache.delete('live');
@@ -1219,7 +1242,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     // Exits judge the bid against the blend too: sell early only when the bid, after its fee, beats what
     // the bot believes holding is worth. Otherwise it rides to the result, which costs no fee.
     const qMid = q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : null;
-    const up = blendProb(this.blend, fair, qMid ?? fair);
+    const up = blendProb(this.blends[bandOf(tau)], fair, qMid ?? fair);
     const fairSide = p.side === 'long' ? up : 1 - up;
     const key = `lx|${p.id}`;
     if (bidSide < fairSide + feeLive(bidSide) + st.exitAbove) { this.seen.delete(key); return; }
@@ -1284,7 +1307,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     // Exits judge the bid against the blend too: sell early only when the bid, after its fee, beats what
     // the bot believes holding is worth. Otherwise it rides to the result, which costs no fee.
     const qMid = q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : null;
-    const up = blendProb(this.blend, fair, qMid ?? fair);
+    const up = blendProb(this.blends[bandOf(tau)], fair, qMid ?? fair);
     const fairSide = p.side === 'long' ? up : 1 - up;
     if (st.makerExit) {
       // A resting sell kept at fair + exitAbove (re-priced as fair moves). It fills, with no fee,
@@ -1322,10 +1345,10 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
 
   // The probability bets are sized on: the math and the market's mid weighed on the log-odds scale
   // (cryptomath.ts blendProb). Up is blended, then turned into the side's chance.
-  private sizingProb(best: Cand, mid: number | null): number {
+  private sizingProb(best: Cand, mid: number | null, tau: number): number {
     const fairUpP = best.side === 'long' ? best.fair : 1 - best.fair;
     const midUp = mid ?? (best.side === 'long' ? best.ask : 1 - best.ask);
-    const up = blendProb(this.blend, fairUpP, midUp);
+    const up = blendProb(this.blends[bandOf(tau)], fairUpP, midUp);
     return best.side === 'long' ? up : 1 - up;
   }
 
@@ -1482,13 +1505,15 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
           const bank = await this.bank(LADDER, t);
           if (dailyStopHit(bank.equity, bank.today, bank.peak)) continue;
           const stake = stakeFor({ fair: best.fair, price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet, ceiling: this.ceiling() });
-          const qty = Math.floor(stake / best.ask);
+          const lstatus = statusOf(this.lab, LADDER);
+          if (lstatus === 'retired') continue;
+          const qty = lstatus === 'testing' ? Math.min(1, Math.floor(stake / best.ask)) : Math.floor(stake / best.ask);
           if (qty < 1) continue;
           const pos = await openPosition(db, {
             strategy: LADDER, slug: m.slug, title: `BTC at ${when}`, side: best.side,
             sideName: `BTC ${best.side === 'long' ? 'above' : 'below'} ${k}`, ask: best.ask, qty, coef: COEF,
             reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, BTC ${Math.round(spot).toLocaleString('en-US')}, ${Math.round(tau / 60)} min left`, now: t,
-            meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(spot), strike, end, tau: Math.round(tau), sigma: raw, mult: this.mult, equity: r2(bank.equity) },
+            meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(spot), strike, end, tau: Math.round(tau), sigma: raw, mult: this.mult, equity: r2(bank.equity), rules: RULES, status: lstatus },
           });
           this.open.push(pos);
           this.bankCache.delete(LADDER);
@@ -1578,16 +1603,17 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         JOIN crypto_marks m ON m.slug = w.slug AND m.ts BETWEEN w.end_ts - (t.at + t.tol) * 1000 AND w.end_ts - (t.at - t.tol) * 1000
         WHERE w.result IS NOT NULL AND w.end_ts > ? AND m.spot IS NOT NULL AND m.strike IS NOT NULL AND m.sigma > 0`).bind(now - 7 * 86_400_000).all<Mark>();
     const g = gradeModel(results, this.mult);
-    // gradeModel only moves the scale one step, with 100+ windows and t >= 2, and only fits the
-    // blend with 100+ windows; until then the 50/50 start stays.
+    // gradeModel only moves the scale one step, with 100+ windows and t >= 2, and only adopts a band's
+    // blend once that band has 100+ windows; until then its 50/50 start stays.
     this.mult = g.next;
-    if (g.blendNext) this.blend = g.blendNext;
+    if (g.bands.early.next) this.blends.early = g.bands.early.next;
+    if (g.bands.late.next) this.blends.late = g.bands.late.next;
     await this.env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
-      .bind('btc_model', JSON.stringify({ ...g, mult: this.mult, active: this.blend, ready: g.windows >= 100, need: 100 }), now).run();
-    // Each strategy's own record since the fix (trades carrying the feed record): what it has shown
-    // per dollar bet, as a Kelly share it may size on (fairvalue.ts recordKelly).
+      .bind('btc_model', JSON.stringify({ ...g, mult: this.mult, active: this.blends, ready: g.bands.early.windows >= 100 && g.bands.late.windows >= 100, need: 100 }), now).run();
+    // Each strategy's own record on the current rules: what it has shown per dollar bet, as a Kelly
+    // share it may size on (fairvalue.ts recordKelly).
     const rows = (await this.env.DB.prepare(`SELECT strategy, pnl, cost, closed_at / 3600000 AS hr FROM bot_positions
-      WHERE mode = 'paper' AND status != 'open' AND strategy LIKE 'crypto_%' AND json_extract(meta, '$.feeds') IS NOT NULL`)
+      WHERE mode = 'paper' AND status != 'open' AND strategy LIKE 'crypto_%' AND COALESCE(json_extract(meta, '$.rules'), 0) >= ${RULES}`)
       .all<{ strategy: string; pnl: number; cost: number; hr: number }>()).results;
     const by = new Map<string, Array<{ pnl: number; cost: number; group: number }>>();
     for (const r of rows) { const a = by.get(r.strategy) || []; a.push({ pnl: r.pnl, cost: r.cost, group: r.hr }); by.set(r.strategy, a); }
@@ -1616,7 +1642,8 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     stmts.push(set.bind('cb_stream', cbLive ? Math.round((this.cbMsgs / secs) * 10) : 0, now));
     const gmLive = !!this.gm && now - this.gm.last < STREAM_STALE;
     stmts.push(set.bind('gm_stream', gmLive ? Math.round((this.gmMsgs / secs) * 10) : 0, now));
-    stmts.push(set.bind('btc_trust', Math.round(this.blend.b * 100), now));   // weight on the math, in hundredths
+    stmts.push(set.bind('btc_trust', Math.round(this.blends.late.b * 100), now));   // weight on the math, last 4 minutes, in hundredths
+    stmts.push(set.bind('btc_trust_early', Math.round(this.blends.early.b * 100), now));   // ...with 4+ minutes left
     stmts.push(set.bind('btc_mult', Math.round(this.mult * 100), now));
     stmts.push(set.bind('replica_books', BOOK_IDS.filter((x) => now - this.bk[x].book.at <= 10_000).length, now));
     await this.env.DB.batch(stmts);

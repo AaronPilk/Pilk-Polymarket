@@ -23,6 +23,7 @@ import { ESPN_PATHS, fetchScoreboard, gameLine, gameState, longSide, matchEvent 
 import { LEAGUE, dailyStopHit, drawdownScale, edgeFloor, isBlowout, riskLimits, shareLeft, sportFair, stakeFor } from './fairvalue';
 import { addToPosition, bankroll, closePosition, loadOpen, openPosition, settlePosition, type Position } from './paper';
 import { SPORTS_POINTS, SPORTS_POINT_TOL } from './sportsgrade';
+import { RULES, statusOf, type Status } from './research';
 
 const GATEWAY = 'https://gateway.polymarket.us';
 const UA = { 'User-Agent': 'pilk-bets/1.0' };
@@ -111,6 +112,7 @@ const HOOPS_STRATEGIES: HoopsStrategy[] = [
   { id: 'hoops_swing_model', maxOpen: 2, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => 0.03, priceMin: 0.08, priceMax: 0.25,
     lateWindow: [3, 12], deficit: [3, 9], fixedShare: 0.02, target2x: true, maxAdds: 0, oneShot: true },
 ];
+export const HOOPS_IDS = HOOPS_STRATEGIES.map((s) => s.id);
 const MAX_EDGE = 0.12;          // a bigger "edge" is more likely our data being stale than a gift
 // Our scoreboard can lag the market, worst around the buzzer, when ESPN posts the last baskets
 // late. In live play the score must have held 15 s (plus the price steady for 20 s); at a
@@ -197,6 +199,10 @@ export class LiveFeed extends DurableObject<LiveEnv> {
   private situation = new Map<string, Situation>();          // espn id → latest game state
   private longHome = new Map<string, boolean>();             // slug → long team is the home team
   private open: Position[] = [];                             // open basketball paper positions
+  // The research board's verdicts (index.ts writes them every 5 minutes): retired strategies stop
+  // opening positions, testing ones bet one contract.
+  private lab: { strategies?: Record<string, { status?: Status }> } | null = null;
+  private labAt = 0;
   private openAt = 0;
 
   // The minute cron calls this so the loop restarts if it ever stopped. This is the Sports bot;
@@ -486,6 +492,11 @@ export class LiveFeed extends DurableObject<LiveEnv> {
   private async paperHoops(games: LiveMarket[], quotes: Map<string, Quote>, now: number, stmts: D1PreparedStatement[]) {
     const db = this.env.DB;
     const allocation = Number(this.env.BOT_ALLOCATION || 100) || 100;
+    if (now - this.labAt >= 5 * 60_000) {
+      this.labAt = now;
+      const lb = await db.prepare("SELECT v FROM brain WHERE k = 'lab_sports'").first<{ v: string }>().catch(() => null);
+      if (lb) { try { this.lab = JSON.parse(lb.v); } catch { /* keep the last board */ } }
+    }
     if (now - this.openAt > 30_000) {
       this.open = [];
       for (const st of HOOPS_STRATEGIES) this.open.push(...(await loadOpen(db, st.id)));
@@ -547,6 +558,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
       const where = (lead: number) => `${lead > 0 ? `up ${lead}` : lead < 0 ? `down ${-lead}` : 'tied'}, ${m.league === 'cbb' ? 'H' : 'Q'}${g.period} ${g.clock}`;
 
       for (const st of HOOPS_STRATEGIES) {
+        const status = statusOf(this.lab, st.id);
         const held = heldHere.find((p) => p.strategy === st.id && p.status === 'open');
         if (held) {
           const v = view(held.side);
@@ -572,7 +584,9 @@ export class LiveFeed extends DurableObject<LiveEnv> {
               continue;
             }
           }
-          if (!st.target2x && fresh && calm && settled && minsLeft > 3 && v.bid >= v.fair + feePer(v.bid) + 0.04) {
+          // The model's own sell when the price runs above its fair. The comeback and late-swing plays exit only
+          // on their own rules (or the final): the model selling them into a growing deficit isn't Aaron's method.
+          if (!st.target2x && st.comeback == null && fresh && calm && settled && minsLeft > 3 && v.bid >= v.fair + feePer(v.bid) + 0.04) {
             await closePosition(db, held, { price: v.bid, coef: COEF, maker: false, reason: `above fair: bid ${cents(v.bid)} vs fair ${cents(v.fair)}, ${where(v.lead)}`, now });
             continue;
           }
@@ -583,15 +597,16 @@ export class LiveFeed extends DurableObject<LiveEnv> {
             // One game is one bet: starter plus adds stay inside the ladder's share of the account.
             const room = bank.equity * riskLimits(bank.peak).bet - held.cost;
             const stake = Math.min(stakeFor({ fair: v.fair, price: v.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet, ceiling: ceiling(this.env) }), room);
-            const qty = Math.floor(stake / v.ask);
-            if (qty >= 1 && !dailyStopHit(bank.equity, bank.today, bank.peak)) {
+            const qty = status === 'testing' ? Math.min(1, Math.floor(stake / v.ask)) : Math.floor(stake / v.ask);
+            if (status !== 'retired' && qty >= 1 && !dailyStopHit(bank.equity, bank.today, bank.peak)) {
               await addToPosition(db, held, { ask: v.ask, qty, coef: COEF, reason: `fair ${cents(v.fair)} vs ask ${cents(v.ask)}, ${where(v.lead)}`, now });
             }
           }
           continue;
         }
 
-        // New position: first part of the game, fresh, calm, settled data only.
+        // New position: first part of the game, fresh, calm, settled data only, and not retired.
+        if (status === 'retired') continue;
         if (!fresh || !calm || !settled || buzzer || prog >= st.maxProgress || minsLeft <= 3) continue;
         if (this.open.filter((p) => p.strategy === st.id && p.status === 'open').length >= st.maxOpen) continue;
         if (st.lateWindow && (minsLeft < st.lateWindow[0] || minsLeft > st.lateWindow[1])) continue;
@@ -614,14 +629,15 @@ export class LiveFeed extends DurableObject<LiveEnv> {
         } else {
           stake = stakeFor({ fair: pick.fair, price: pick.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet, ceiling: ceiling(this.env) });
         }
-        const qty = Math.floor(stake / pick.ask);
+        // Testing: one contract a bet until the board has enough to judge.
+        const qty = status === 'testing' ? Math.min(1, Math.floor(stake / pick.ask)) : Math.floor(stake / pick.ask);
         if (qty < 1) continue;
         const why = st.trailing
           ? `behind and ${cents(pick.start - pick.ask)} under tip-off; fair ${cents(pick.fair)} vs ask ${cents(pick.ask)}, ${where(pick.lead)}`
           : `fair ${cents(pick.fair)} vs ask ${cents(pick.ask)}, ${where(pick.lead)}`;
         const pos = await openPosition(db, {
           strategy: st.id, slug: m.slug, title: `${m.long_team || 'Home'} vs. ${m.short_team || 'Away'}`, side: pick.side,
-          sideName: pick.team, ask: pick.ask, qty, coef: COEF, reason: why, now, tpBelow: st.target2x ? 1 : undefined,
+          sideName: pick.team, ask: pick.ask, qty, coef: COEF, reason: why, now, tpBelow: st.target2x ? 1 : undefined, meta: { rules: RULES, status },
         });
         this.open.push(pos);
         heldHere.push(pos);
