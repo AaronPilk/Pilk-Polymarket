@@ -341,6 +341,9 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private evtAt = 0;
   private evtGaps: Array<[number, number, string, string, number]> = [];
   private evtLast: [string, number] = ['', 0];
+  private pxAt = 0;
+  private pxGaps: Array<[number, number, string]> = [];   // gaps 0.8 s+ between price events (the ones that feed the record)
+  private cbConnects = 0; private gmConnects = 0; private bookConnects = 0;
   private loopSteps: Array<Record<string, number>> = [];
   private loopAt = 0;
   private counts: Record<Kind, number> = { crypto_ticks: 0, crypto_signals: 0, spot: 0, gap_skips: 0, feed_skips: 0, jump_skips: 0, event_skips: 0, fee_skips: 0 };
@@ -363,6 +366,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     try {
       await this.boot(now); lap('boot');
       await this.ensureStreams(now); lap('streams');
+      step.pmc = this.pmConnects; step.cbc = this.cbConnects; step.gmc = this.gmConnects; step.bkc = this.bookConnects;
       const stmts: D1PreparedStatement[] = [];
       await this.readSpot(now, stmts); lap('spot');
       this.current = new Map(this.windowsAt(now).map((w) => [w.slug, w]));
@@ -428,7 +432,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     this.loopAt = now;
     try {
       await this.env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
-        .bind('btc_loop', JSON.stringify({ gaps: this.evtGaps, steps: this.loopSteps }), now).run();
+        .bind('btc_loop', JSON.stringify({ gaps: this.evtGaps, px: this.pxGaps, steps: this.loopSteps }), now).run();
     } catch (e) { console.log('loop log error', String((e as any)?.message || e)); }
   }
 
@@ -569,6 +573,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     ws.accept();
     const conn: Conn = { ws, slugs: [], at: now, last: now, n: 0 };
     const s = this.bk[f];
+    this.bookConnects++;
     s.book.clear();
     s.book.at = 0;
     ws.addEventListener('message', (e) => this.onBook(f, conn, e.data));
@@ -666,7 +671,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       bid: num(d.bestBid), ask: num(d.bestAsk), ts: now, src: 'stream', state: d.state || null,
       bidShares: num(d.bidShares), askShares: num(d.askShares),
     });
-    this.secTick(now);
+    this.secTick(now, 'pm');
     this.kick(d.marketSlug);
   }
 
@@ -683,6 +688,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     ws.addEventListener('close', gone);
     ws.addEventListener('error', gone);
     ws.send(JSON.stringify({ type: 'subscribe', product_ids: ['BTC-USD'], channels: ['ticker'] }));
+    this.cbConnects++;
     const old = this.cb;
     this.cb = conn;
     if (old) try { old.ws.close(1000, 'reconnected'); } catch {}
@@ -711,6 +717,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     ws.accept();
     const conn: Conn = { ws, slugs: [], at: now, last: now, n: 0 };
     this.gmBook = { bid: null, ask: null };
+    this.gmConnects++;
     ws.addEventListener('message', (e) => this.onGm(conn, e.data));
     const gone = () => { if (this.gm === conn) this.gm = null; };
     ws.addEventListener('close', gone);
@@ -748,7 +755,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     if (c == null) return;
     this.spot = { price: c, ts: now, src: 'stream' };
     this.sample(now, c);
-    this.secTick(now);
+    this.secTick(now, f);
     // A jump: the price moved JUMP_Z standard deviations in about 10 seconds. The market reprices
     // faster than the bot can, so entries pause for a moment.
     const sig = this.sigma15(now);
@@ -819,7 +826,12 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
 
   // The per-second record (seconds.ts): on the first price or quote of each new second, a copy of
   // what the bot sees. Recording only; nothing reads it back to trade, and errors are swallowed.
-  private secTick(now: number) {
+  private secTick(now: number, src: string) {
+    if (this.pxAt && now - this.pxAt >= 800) {
+      this.pxGaps.push([this.pxAt, now - this.pxAt, src]);
+      if (this.pxGaps.length > 60) this.pxGaps.shift();
+    }
+    this.pxAt = now;
     const sec = Math.floor(now / 1000);
     if (sec <= this.recSec) return;
     this.recSec = sec;
