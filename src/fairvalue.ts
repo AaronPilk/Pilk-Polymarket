@@ -278,3 +278,19 @@ export function dailyStopHit(equity: number, today: number, peak = equity): bool
   const startOfDay = equity - today;
   return today <= -Math.max(1, startOfDay * riskLimits(Math.max(peak, startOfDay)).day);
 }
+
+// Keep at most 2 × chunks points: the low and the high of each stretch, in order, plus the last.
+export function thinLine(pts: [number, number][], chunks: number): [number, number][] {
+  if (pts.length <= chunks * 2) return pts;
+  const out: [number, number][] = [], size = pts.length / chunks;
+  for (let c = 0; c < chunks; c++) {
+    const part = pts.slice(Math.floor(c * size), Math.floor((c + 1) * size));
+    if (!part.length) continue;
+    let lo = part[0], hi = part[0];
+    for (const p of part) { if (p[1] < lo[1]) lo = p; if (p[1] > hi[1]) hi = p; }
+    const pair = lo === hi ? [lo] : part.indexOf(lo) < part.indexOf(hi) ? [lo, hi] : [hi, lo];
+    out.push(...pair);
+  }
+  if (out.at(-1) !== pts.at(-1)) out.push(pts.at(-1)!);
+  return out;
+}

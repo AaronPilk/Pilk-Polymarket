@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from '../src/replica.ts';
-import { edgeFloor, otherSideCheap, recordKelly, stakeFor } from '../src/fairvalue.ts';
+import { edgeFloor, otherSideCheap, recordKelly, stakeFor, thinLine } from '../src/fairvalue.ts';
 import { returnStats } from '../src/ready.ts';
 import { takeProfitFor } from '../src/paper.ts';
 import { gradeSports, type SportsMark } from '../src/sportsgrade.ts';
@@ -213,4 +213,16 @@ test("Aaron's price tiers: most around 10¢, less at 5¢ and 20¢+, never past t
   assert.equal(takeProfitFor(0.04, 0), null);
   assert.equal(takeProfitFor(0.12, 1), 0.24);
   assert.equal(takeProfitFor(0.12), 0.24);   // the old default: every entry under 15¢
+});
+
+test('per-strategy chart lines are thinned without losing their shape', () => {
+  const short: [number, number][] = [[1, 1], [2, -1]];
+  assert.deepEqual(thinLine(short, 60), short);
+  const long: [number, number][] = Array.from({ length: 500 }, (_, i) => [i, i === 250 ? -40 : i === 400 ? 55 : Math.sin(i / 10)]);
+  const out = thinLine(long, 60);
+  assert.ok(out.length <= 121);
+  assert.deepEqual(out.at(-1), long.at(-1));
+  assert.ok(out.some((p) => p[1] === -40));
+  assert.ok(out.some((p) => p[1] === 55));
+  for (let i = 1; i < out.length; i++) assert.ok(out[i][0] > out[i - 1][0]);
 });

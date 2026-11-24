@@ -10,6 +10,8 @@ const store = {
   botGroup: 'btc', // live | btc | hoops
   botGroupSet: false,
   botCurve: {},    // 'paper:1d' | 'live:all' ... -> { at, data } from /api/bot/curve
+  botFocus: null,  // one strategy on the big chart, or null for the whole bot
+  showRetired: false,
   range: 'all',
   mode: 'live',    // live | cached | preview
   betFilter: 'All',
@@ -248,6 +250,8 @@ function countUp(el, target) {
 }
 
 // chart ----------------------------------------------------------
+// Charts sit inside the page margins with room at the right end for the "now" dot and a thumb.
+const PAD_L = 2, PAD_R = 22;
 let chartEntered = false;
 function drawChart(series) {
   const wrap = $('#chart');
@@ -262,7 +266,8 @@ function drawChart(series) {
   const ys = pts.map((p) => p.y);
   const min = Math.min(0, ...ys), max = Math.max(0, ...ys);
   const span = max - min || 1;
-  const x = (i) => (i / (pts.length - 1)) * W;
+  const x0 = PAD_L, x1 = W - PAD_R;
+  const x = (i) => x0 + (i / (pts.length - 1)) * (x1 - x0);
   const y = (v) => padY + (1 - (v - min) / span) * (H - padY * 2);
   const d = pts.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.y).toFixed(1)}`).join('');
   const up = pts.at(-1).y >= 0;
@@ -271,7 +276,7 @@ function drawChart(series) {
   wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="${chartEntered || reduceMotion ? '' : 'chart-enter'}">
     <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${up ? '#30d158' : '#ff453a'}" stop-opacity=".28"/><stop offset="1" stop-color="${up ? '#30d158' : '#ff453a'}" stop-opacity="0"/></linearGradient></defs>
     <line class="chart-zero" x1="0" x2="${W}" y1="${y(0)}" y2="${y(0)}"/>
-    <path d="${d}L${W},${H}L0,${H}Z" fill="url(#${gid})"/>
+    <path d="${d}L${x1},${H}L${x0},${H}Z" fill="url(#${gid})"/>
     <path class="chart-line" d="${d}" stroke="${color}"/>
     <line class="chart-cursor" y1="0" y2="${H}" x1="-10" x2="-10" visibility="hidden"/>
     <circle class="chart-dot" r="6" fill="${color}" cx="-10" cy="-10" visibility="hidden"/>
@@ -283,7 +288,7 @@ function drawChart(series) {
   const svg = $('svg', wrap), cur = $('.chart-cursor', svg), dot = $('.chart-dot', svg);
   const show = (clientX) => {
     const r = wrap.getBoundingClientRect();
-    const i = Math.max(0, Math.min(pts.length - 1, Math.round(((clientX - r.left) / r.width) * (pts.length - 1))));
+    const i = Math.max(0, Math.min(pts.length - 1, Math.round(((clientX - r.left - x0) / (x1 - x0)) * (pts.length - 1))));
     const p = pts[i];
     cur.setAttribute('x1', x(i)); cur.setAttribute('x2', x(i));
     dot.setAttribute('cx', x(i)); dot.setAttribute('cy', y(p.y));
@@ -594,13 +599,18 @@ function renderBot() {
       <div class="segmented" id="bot-range" role="tablist" aria-label="Chart range"><div class="thumb"></div>
         <button data-range="run" role="tab">Run</button><button data-range="1h" role="tab">1H</button><button data-range="1d" role="tab">1D</button><button data-range="1w" role="tab">1W</button><button data-range="all" role="tab">All</button>
       </div>
+      <div class="section strat-section">
+        <div class="section-title">Every strategy<small id="bot-grid-sub"></small></div>
+        <div id="bot-grid"></div>
+      </div>
       <div id="bot-rest"></div>`;
     botBuilt = true;
     setupBotControls();
   }
-  const groups = botGroups(b);
-  $('#bot-groups').innerHTML = groups.length > 1 ? groups.map((g) => `<button class="chip ${store.botGroup === g ? 'on' : ''}" data-group="${g}">${GROUP_LABEL[g]}</button>`).join('') : '';
+  if (store.botFocus && groupOf(store.botFocus) !== BOOK_GROUP[b.book || 'btc']) store.botFocus = null;
+  paintBotChips();
   if (!botScrub) { paintBotHero(); drawBotChart(); }
+  paintStratGrid();
   $('#bot-rest').innerHTML = botRest(b);
 }
 
@@ -620,6 +630,7 @@ function setupBotControls() {
     try { localStorage.setItem('pm-bot-book', store.botBook); } catch {}
     store.botGroup = BOOK_GROUP[store.botBook];
     store.botGroupSet = false;
+    store.botFocus = null;
     bplace();
     botAnimate = true;
     refreshBot({ curve: true });
@@ -645,17 +656,27 @@ function setupBotControls() {
       return !c || Date.now() - c.at > 30_000 ? loadCurve(store.botRange, m) : null;
     }));
     botAnimate = true;
-    paintBotHero(); drawBotChart();
+    paintBotHero(); drawBotChart(); paintStratGrid();
     $('#bot-rest').innerHTML = botRest(store.bot);
   }));
   new ResizeObserver(() => { place(); if (!botScrub) drawBotChart(); }).observe(seg);
   place();
   $('#bot-groups').addEventListener('click', (e) => {
+    if (e.target.closest('[data-unfocus]')) { setFocus(null); return; }
     const c = e.target.closest('[data-group]');
-    if (!c || store.botGroup === c.dataset.group) return;
+    if (!c || (store.botGroup === c.dataset.group && !store.botFocus)) return;
     store.botGroup = c.dataset.group;
+    store.botFocus = null;
     botAnimate = true;
     renderBot();
+  });
+  // Tap a strategy's card: the big chart above switches to that strategy alone.
+  $('#bot-grid').addEventListener('click', (e) => {
+    if (e.target.closest('[data-retired-toggle]')) { store.showRetired = !store.showRetired; paintStratGrid(); return; }
+    const c = e.target.closest('[data-strat]');
+    if (!c) return;
+    setFocus(store.botFocus === c.dataset.strat ? null : c.dataset.strat);
+    if (store.botFocus) $('#bot-label').scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
   });
 }
 
@@ -666,16 +687,103 @@ function botSeries() {
   if (!c || !b) return null;
   const live = store.botGroup === 'live';
   const g = live ? 'all' : store.botGroup;
-  const ys = c[g] || [], ns = c.n?.[g] || [];
+  const focus = !live && store.botFocus;
   const pts = [{ t: c.from, y: 0, n: 0 }];
-  for (let i = 0; i < c.t.length; i++) pts.push({ t: c.t[i], y: ys[i] ?? 0, n: ns[i] ?? 0 });
-  const onRules = (p) => { try { return (JSON.parse(p.meta || '{}').rules || 0) >= (b.rules || 0); } catch { return false; } };
-  const positions = (live ? b.live?.positions || [] : (b.positions || []).filter((p) => g === 'all' || groupOf(p.strategy) === g))
-    .filter((p) => store.botRange !== 'run' || onRules(p));
-  const open = positions.reduce((s, p) => s + (p.upnl || 0), 0);
+  let wins, losses, from = c.from;
   const now = Math.max(Date.now(), c.to);
+  if (focus) {
+    // One strategy, bet by bet, as steps: flat until a bet closes, then a jump. The chart starts just
+    // before its first bet in the range, so a strategy that began today isn't squeezed into the corner.
+    const s = c.per?.[focus], raw = (s?.pts || []).map(([sec, y]) => ({ t: c.from + sec * 1000, y }));
+    if (raw.length) from = Math.max(c.from, raw[0].t - Math.max(60_000, (now - raw[0].t) * 0.04));
+    pts[0].t = from;
+    for (const p of raw) { pts.push({ t: p.t, y: pts.at(-1).y, n: 0, step: true }); pts.push({ t: p.t, y: p.y, n: 1 }); }
+    wins = s?.w || 0; losses = (s?.n || 0) - wins;
+  } else {
+    const ys = c[g] || [], ns = c.n?.[g] || [];
+    for (let i = 0; i < c.t.length; i++) pts.push({ t: c.t[i], y: ys[i] ?? 0, n: ns[i] ?? 0 });
+    wins = c.wins?.[g] || 0; losses = c.losses?.[g] || 0;
+  }
+  const open = openFor(b, live ? null : focus || g, live);
+  if (focus) pts.push({ t: now, y: pts.at(-1).y, n: 0, step: true });
   pts.push({ t: now, y: pts.at(-1).y + open, n: 0, now: true });
-  return { pts, from: c.from, to: now, open, wins: c.wins?.[g] || 0, losses: c.losses?.[g] || 0 };
+  return { pts, from, to: now, open, wins, losses };
+}
+
+// Open positions marked at what they'd sell for: the whole group, one strategy, or real money.
+const onRulesPos = (p, b) => { try { return (JSON.parse(p.meta || '{}').rules || 0) >= (b.rules || 0); } catch { return false; } };
+function openFor(b, who, live = false) {
+  const list = live ? b.live?.positions || [] : (b.positions || []).filter((p) => !who || who === 'all' || (who.includes('_') ? p.strategy === who : groupOf(p.strategy) === who));
+  return list.filter((p) => store.botRange !== 'run' || onRulesPos(p, b)).reduce((s, p) => s + (p.upnl || 0), 0);
+}
+function setFocus(id) {
+  store.botFocus = id;
+  botAnimate = true;
+  paintBotChips(); paintBotHero(); drawBotChart(); paintStratGrid();
+}
+function paintBotChips() {
+  const b = store.bot, el = $('#bot-groups');
+  if (!b || !el) return;
+  const groups = botGroups(b);
+  const chips = groups.length > 1 ? groups.map((g) => `<button class="chip ${store.botGroup === g && !store.botFocus ? 'on' : ''}" data-group="${g}">${GROUP_LABEL[g]}</button>`) : [];
+  if (store.botFocus) {
+    if (!chips.length) chips.push(`<button class="chip" data-unfocus>All strategies</button>`);
+    chips.push(`<button class="chip on" data-unfocus>${esc(variantOf(store.botFocus))} <span aria-hidden="true">✕</span></button>`);
+  }
+  el.innerHTML = chips.join('');
+}
+
+// One small chart per strategy, each on its own scale, best first. The line goes bet by bet (left is
+// its first bet in the range, right is now), so a strategy that just started fills the card too.
+function miniChart(pts, open) {
+  const W = 150, H = 46, pad = 3;
+  const ys = [0, ...pts.map((p) => p[1])];
+  if (Math.abs(open) >= 0.005) ys.push(ys.at(-1) + open);
+  if (ys.length < 2) return `<svg class="mini" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true"><line class="spark-zero" x1="0" x2="${W}" y1="${H / 2}" y2="${H / 2}"/></svg>`;
+  let min = Math.min(0, ...ys), max = Math.max(0, ...ys);
+  if (max - min < 2) { const mid = (max + min) / 2; min = mid - 1; max = mid + 1; } // $2 floor so pennies don't look like cliffs
+  const x = (i) => (i / (ys.length - 1)) * W, y = (v) => pad + (1 - (v - min) / (max - min)) * (H - pad * 2);
+  const d = ys.map((v, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join('');
+  const up = ys.at(-1) >= 0, col = up ? '#30d158' : '#ff453a', gid = `m${Math.random().toString(36).slice(2, 7)}`;
+  return `<svg class="mini" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
+    <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${col}" stop-opacity=".22"/><stop offset="1" stop-color="${col}" stop-opacity="0"/></linearGradient></defs>
+    <line class="spark-zero" x1="0" x2="${W}" y1="${y(0).toFixed(1)}" y2="${y(0).toFixed(1)}"/>
+    <path d="${d}L${W},${H}L0,${H}Z" fill="url(#${gid})"/>
+    <path class="mini-line" d="${d}" stroke="${up ? 'var(--green)' : 'var(--red)'}"/>
+  </svg>`;
+}
+function paintStratGrid() {
+  const el = $('#bot-grid'), b = store.bot;
+  if (!el || !b) return;
+  const c = store.botCurve[curveKey('paper')]?.data;
+  if (!c) { el.innerHTML = '<div class="card empty">Loading…</div>'; return; }
+  const group = BOOK_GROUP[b.book || 'btc'];
+  const lab = b.lab?.strategies || {};
+  const cards = Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === group).map((id) => {
+    const s = c.per?.[id] || { n: 0, w: 0, pnl: 0, staked: 0, pts: [] };
+    const open = openFor(b, id);
+    const nOpen = (b.positions || []).filter((p) => p.strategy === id && (store.botRange !== 'run' || onRulesPos(p, b))).length;
+    return { id, s, open, nOpen, total: s.pnl + open, status: lab[id]?.status || 'testing' };
+  });
+  const live = cards.filter((x) => x.status !== 'retired'), retired = cards.filter((x) => x.status === 'retired');
+  const order = (xs) => xs.sort((a, z) => (z.s.n || z.nOpen ? 1 : 0) - (a.s.n || a.nOpen ? 1 : 0) || z.total - a.total);
+  const card = (x) => {
+    const { s } = x, pill = STATUS_PILL[x.status] || ['', x.status];
+    const roi = s.staked > 0 ? ` · ${signedPct(s.pnl / s.staked, 0)}` : '';
+    const sub = s.n ? `${s.w}–${s.n - s.w}${roi}` : x.nOpen ? 'no closed bets yet' : 'no bets in this range';
+    return `<button class="strat-card ${store.botFocus === x.id ? 'on' : ''} ${x.status === 'retired' ? 'dim' : ''}" data-strat="${x.id}">
+      <div class="sc-top"><span class="sc-name">${esc(variantOf(x.id))}</span></div>
+      <div class="sc-amt num ${tone(x.total)}">${s.n || x.nOpen ? money(x.total, { sign: true }) : '–'}</div>
+      ${miniChart(s.pts, x.open)}
+      <div class="sc-foot"><span>${sub}</span>${pill[1] ? `<span class="pill ${pill[0]}">${pill[1]}</span>` : ''}</div>
+      ${x.nOpen ? `<div class="sc-open">${x.nOpen} open ${money(x.open, { sign: true })}</div>` : ''}
+    </button>`;
+  };
+  $('#bot-grid-sub').textContent = 'tap one to chart it';
+  el.innerHTML = `<div class="strat-grid">${order(live).map(card).join('')}</div>
+    ${retired.length ? `<button class="more" data-retired-toggle>${store.showRetired ? 'Hide' : 'Show'} ${retired.length} retired</button>
+    ${store.showRetired ? `<div class="strat-grid">${order(retired).map(card).join('')}</div>` : ''}` : ''}
+    <div class="row-sub wrap pad">Each card is one strategy's own $100 paper account: its P&L in this range including open bets, wins–losses, and return on the money it bet. Each chart is on its own scale and runs bet by bet, so compare the dollar numbers, not the heights.</div>`;
 }
 
 const botTime = (t) => (store.botRange === '1h' || store.botRange === '1d'
@@ -689,7 +797,8 @@ function paintBotHero() {
   const pill = live
     ? `<span class="pill ${b.live?.on ? 'won' : 'lost'}" style="vertical-align:2px;margin-left:4px">${b.live?.on ? 'Live' : 'Off'}</span>`
     : '<span class="pill open" style="vertical-align:2px;margin-left:4px">Paper</span>';
-  $('#bot-label').innerHTML = `${live ? 'Real money' : GROUP_LABEL[store.botGroup]} · ${BOT_RANGE_LABEL[store.botRange]} ${pill}`;
+  const focus = !live && store.botFocus;
+  $('#bot-label').innerHTML = `${live ? 'Real money' : focus ? esc(variantOf(focus)) : GROUP_LABEL[store.botGroup]} · ${BOT_RANGE_LABEL[store.botRange]} ${pill}`;
   const fallback = live ? (b.live?.realized || 0) + (b.live?.unrealized || 0) : (b.realized || 0) + (b.unrealized || 0);
   const v = S ? S.pts.at(-1).y : fallback;
   const el = $('#bot-value');
@@ -700,13 +809,19 @@ function paintBotHero() {
   // Paper: every strategy runs its own account, so the total is out of all of them together.
   const nAcc = Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === BOOK_GROUP[b.book || 'btc']).length;
   const paperCap = nAcc * (b.allocation || 100);
-  if (!live && paperCap > 0) parts.push(`<span><b class="${tone(v)}">${signedPct(v / paperCap)}</b> of ${money(paperCap, { cents: false })} paper (${nAcc} accounts × ${money(b.allocation, { cents: false })})</span>`);
+  if (focus) {
+    const s = store.botCurve[curveKey('paper')]?.data?.per?.[focus];
+    const st = b.lab?.strategies?.[focus];
+    if (s?.staked > 0) parts.push(`<span><b class="${tone(s.pnl)}">${signedPct(s.pnl / s.staked)}</b> on ${money(s.staked)} bet</span>`);
+    if (st) parts.push(`<span class="pill ${STATUS_PILL[st.status]?.[0] || ''}">${STATUS_PILL[st.status]?.[1] || esc(st.status)}</span>`);
+  }
+  if (!live && !focus && paperCap > 0) parts.push(`<span><b class="${tone(v)}">${signedPct(v / paperCap)}</b> of ${money(paperCap, { cents: false })} paper (${nAcc} accounts × ${money(b.allocation, { cents: false })})</span>`);
   // Fees so far, as a share of the money bet, and what the same trades would cost through the API
   // (flat 0.0695 with 70% rebated, Nov 21 to Dec 31, 2026) against paper's full 0.095.
   const onRun = store.botRange === 'run' && b.run;
   const fees = onRun ? b.run.fees || 0 : b.fees, staked = onRun ? b.run.staked || 0 : b.staked;
-  if (!live && staked > 0 && fees > 0) parts.push(`<span>Fees <b>${money(fees)}</b> (${pct(fees / staked, 1)} of ${money(staked, { cents: false })} bet), about ${money(fees * API_FEE_SHARE)} through the API</span>`);
-  if (!live && onRun) {
+  if (!live && !focus && staked > 0 && fees > 0) parts.push(`<span>Fees <b>${money(fees)}</b> (${pct(fees / staked, 1)} of ${money(staked, { cents: false })} bet), about ${money(fees * API_FEE_SHARE)} through the API</span>`);
+  if (!live && !focus && onRun) {
     const allTime = (b.realized || 0) + (b.unrealized || 0);
     parts.push(`<span>All-time <b class="${tone(allTime)}">${money(allTime, { sign: true })}</b>, retired tests included</span>`);
   }
@@ -725,10 +840,13 @@ function drawBotChart() {
   const S = botSeries();
   if (!S) { wrap.innerHTML = `<div class="empty" style="padding-top:70px">Loading the chart…</div>`; axis.innerHTML = ''; return; }
   const { pts, from, to } = S;
+  // The line stops short of the right edge (PAD_R), so a thumb can reach "now" without running into
+  // the phone's rounded corner; anywhere past the end still picks the last point.
   const W = wrap.clientWidth || 360, H = wrap.clientHeight || 190, padY = 16;
+  const x0 = PAD_L, x1 = W - PAD_R;
   const ys = pts.map((p) => p.y);
   const min = Math.min(0, ...ys), max = Math.max(0, ...ys), span = max - min || 1;
-  const x = (t) => ((t - from) / (to - from || 1)) * W;
+  const x = (t) => x0 + ((t - from) / (to - from || 1)) * (x1 - x0);
   const y = (v) => padY + (1 - (v - min) / span) * (H - padY * 2);
   const d = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t).toFixed(1)},${y(p.y).toFixed(1)}`).join('');
   const up = pts.at(-1).y >= 0;
@@ -739,7 +857,7 @@ function drawBotChart() {
   wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="${animate ? 'chart-enter' : ''}">
     <defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${up ? '#30d158' : '#ff453a'}" stop-opacity=".26"/><stop offset="1" stop-color="${up ? '#30d158' : '#ff453a'}" stop-opacity="0"/></linearGradient></defs>
     <line class="chart-zero" x1="0" x2="${W}" y1="${y(0)}" y2="${y(0)}"/>
-    <path d="${d}L${x(to)},${H}L0,${H}Z" fill="url(#${gid})"/>
+    <path d="${d}L${x(to)},${H}L${x0},${H}Z" fill="url(#${gid})"/>
     <path class="chart-line" d="${d}" stroke="${color}"/>
     <circle class="chart-now" r="3.5" fill="${color}" cx="${x(to)}" cy="${y(pts.at(-1).y)}"/>
     <line class="chart-cursor" y1="0" y2="${H}" x1="-10" x2="-10" visibility="hidden"/>
@@ -752,9 +870,9 @@ function drawBotChart() {
   const svg = $('svg', wrap), cur = $('.chart-cursor', svg), dot = $('.chart-dot', svg);
   const show = (clientX) => {
     const r = wrap.getBoundingClientRect();
-    const t = from + Math.max(0, Math.min(1, (clientX - r.left) / r.width)) * (to - from);
+    const t = from + Math.max(0, Math.min(1, (clientX - r.left - x0) / (x1 - x0))) * (to - from);
     let i = 0;
-    for (let k = 0; k < pts.length; k++) if (Math.abs(pts[k].t - t) < Math.abs(pts[i].t - t)) i = k;
+    for (let k = 0; k < pts.length; k++) if (!pts[k].step && Math.abs(pts[k].t - t) <= Math.abs(pts[i].t - t)) i = k;
     const p = pts[i];
     cur.setAttribute('x1', x(p.t)); cur.setAttribute('x2', x(p.t));
     dot.setAttribute('cx', x(p.t)); dot.setAttribute('cy', y(p.y));
@@ -1046,8 +1164,6 @@ function liveSection(L) {
 function botRest(b) {
   const L = b.live;
   const losses = (b.record?.closed || 0) - (b.record?.wins || 0);
-  // Each paper strategy runs its own account; the sparkline is its P&L over the chart's range.
-  const strat = store.botCurve[curveKey('paper')]?.data?.strat || {};
   const book = b.book || 'btc', group = BOOK_GROUP[book];
   const ids = Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === group);
   const lineup = ids.map((id) => ({ strategy: id, closed: 0, wins: 0, open: 0, pnl: 0, staked: 0, ...((b.byStrategy || []).find((x) => x.strategy === id) || {}) }));
@@ -1063,7 +1179,7 @@ function botRest(b) {
     if (!rows.length) return '';
     const total = rows.reduce((s, x) => s + (x.pnl || 0), 0);
     return `<div class="group-head" style="display:flex;justify-content:space-between"><span>${title}</span><span class="num ${tone(total)}">${money(total, { sign: true })}</span></div>
-      <div class="card">${rows.map((x) => `<div class="row"><div class="row-main"><div class="row-title">${esc(variantOf(x.strategy))}${L && L.strategy === x.strategy ? ' <span class="pill won">Real money</span>' : ''}</div><div class="row-sub">${x.closed ? `${x.wins}–${x.closed - x.wins} · ${x.staked ? signedPct(x.pnl / x.staked) : '–'} on ${money(x.staked)}` : 'No closed trades yet'}${x.open ? ` · ${x.open} open` : ''}${b.exits?.[x.strategy]?.early ? ` · early sells ${money(b.exits[x.strategy].vsHold, { sign: true })} vs holding` : ''}${b.records?.[x.strategy]?.f > 0 ? ` · sizing up on its record (${signedPct(b.records[x.strategy].mean)} a dollar, t ${Number(b.records[x.strategy].t).toFixed(1)})` : ''}</div></div><div class="row-end strat-end">${spark(strat[x.strategy])}<div class="row-amt ${tone(x.pnl)}">${money(x.pnl, { sign: true })}</div></div></div>`).join('')}</div>`;
+      <div class="card">${rows.map((x) => `<div class="row"><div class="row-main"><div class="row-title">${esc(variantOf(x.strategy))}${L && L.strategy === x.strategy ? ' <span class="pill won">Real money</span>' : ''}</div><div class="row-sub">${x.closed ? `${x.wins}–${x.closed - x.wins} · ${x.staked ? signedPct(x.pnl / x.staked) : '–'} on ${money(x.staked)}` : 'No closed trades yet'}${x.open ? ` · ${x.open} open` : ''}${b.exits?.[x.strategy]?.early ? ` · early sells ${money(b.exits[x.strategy].vsHold, { sign: true })} vs holding` : ''}${b.records?.[x.strategy]?.f > 0 ? ` · sizing up on its record (${signedPct(b.records[x.strategy].mean)} a dollar, t ${Number(b.records[x.strategy].t).toFixed(1)})` : ''}</div></div><div class="row-end strat-end"><div class="row-amt ${tone(x.pnl)}">${money(x.pnl, { sign: true })}</div></div></div>`).join('')}</div>`;
   };
   const showLive = L && store.botGroup === 'live';
 
@@ -1111,7 +1227,7 @@ function botRest(b) {
     </div>
 
     <div class="section">
-      <div class="section-title">Paper strategies<small>each its own ${money(b.allocation, { cents: false })}</small></div>
+      <div class="section-title">All-time by strategy<small>each its own ${money(b.allocation, { cents: false })}</small></div>
       <div class="stats" style="margin-bottom:6px">${tiles.map(statTile).join('')}</div>
       ${stratGroup(group, book === 'btc' ? 'Bitcoin' : 'Basketball')}
       ${book === 'sports' && !b.sports ? '<div class="card pad off-note"><b>The Sports bot is asleep.</b> SPORTS is set to off in Cloudflare.</div>' : ''}

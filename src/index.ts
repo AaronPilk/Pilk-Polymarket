@@ -1,7 +1,7 @@
 import { aggregateOrder, isApiFill, normalize, parseFill, pm, type Fill, type PmEnv, type Row } from './polymarket';
 import { recordMarkets, settleMarkets } from './recorder';
 import { bankroll } from './paper';
-import { RISK_LADDER, drawdownScale, riskLimits } from './fairvalue';
+import { RISK_LADDER, drawdownScale, riskLimits, thinLine } from './fairvalue';
 import { readiness, type ReadyRow } from './ready';
 import { RULES, board, AT_SIZE_SQL, QUICK_SQL, quickScore, type Quick } from './research';
 import { nextEvent } from './cryptomath';
@@ -368,8 +368,8 @@ async function botCurve(env: Env, range: string, mode: 'paper' | 'live') {
   let from = SPANS[range] ? now - SPANS[range] : 0;
   // "run": only bets placed under the current rules (the research board's run), from its first bet.
   const onRules = range === 'run' ? ` AND COALESCE(json_extract(meta, '$.rules'), 0) >= ${RULES}` : '';
-  const rows = (await env.DB.prepare(`SELECT closed_at AS t, pnl, strategy FROM bot_positions WHERE mode = ? AND status != 'open' AND closed_at >= ?${onRules} ORDER BY closed_at`)
-    .bind(mode, from).all<{ t: number; pnl: number | null; strategy: string | null }>()).results;
+  const rows = (await env.DB.prepare(`SELECT closed_at AS t, pnl, cost, strategy FROM bot_positions WHERE mode = ? AND status != 'open' AND closed_at >= ?${onRules} ORDER BY closed_at`)
+    .bind(mode, from).all<{ t: number; pnl: number | null; cost: number | null; strategy: string | null }>()).results;
   if (!SPANS[range]) {
     const first = await env.DB.prepare(`SELECT MIN(opened_at) AS t FROM bot_positions WHERE mode = ?${onRules}`).bind(mode).first<{ t: number | null }>();
     from = Math.min(first?.t ?? now - 3_600_000, now - 3_600_000);
@@ -381,6 +381,21 @@ async function botCurve(env: Env, range: string, mode: 'paper' | 'live') {
   const wins: Record<string, number> = {}, losses: Record<string, number> = {};
   for (const g of groups) { sum[g] = new Array(N).fill(0); n[g] = new Array(N).fill(0); wins[g] = 0; losses[g] = 0; }
   const strat: Record<string, number[]> = {};
+  // Each strategy's own line, bet by bet: [seconds after "from", running P&L], for the per-strategy
+  // charts. Long runs are thinned to the low and high of each stretch so the shape survives.
+  const per: Record<string, { n: number; w: number; pnl: number; staked: number; pts: [number, number][] }> = {};
+  for (const r of rows) {
+    const k = r.strategy || 'other';
+    const x = (per[k] ||= { n: 0, w: 0, pnl: 0, staked: 0, pts: [] });
+    x.n++; if ((r.pnl || 0) > 0) x.w++;
+    x.pnl = Math.round((x.pnl + (r.pnl || 0)) * 100) / 100;
+    x.staked += r.cost || 0;
+    x.pts.push([Math.round((r.t - from) / 1000), x.pnl]);
+  }
+  for (const x of Object.values(per)) {
+    x.staked = Math.round(x.staked * 100) / 100;
+    x.pts = thinLine(x.pts, 60);
+  }
   for (const r of rows) {
     const i = Math.min(N - 1, Math.max(0, Math.floor((r.t - from) / step)));
     const pnl = r.pnl || 0;
@@ -400,6 +415,7 @@ async function botCurve(env: Env, range: string, mode: 'paper' | 'live') {
     all: running(sum.all), btc: running(sum.btc), hoops: running(sum.hoops),
     n, wins, losses,
     strat: Object.fromEntries(Object.entries(strat).map(([k, v]) => [k, running(v)])),
+    per,
   };
 }
 
