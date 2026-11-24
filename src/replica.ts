@@ -38,6 +38,16 @@ export class Book {
     for (const m of [this.bids, this.asks]) for (const p of m.keys()) if (Math.abs(p - mid) > mid * band) m.delete(p);
   }
 
+  // Best bid and best ask, the middle of the two: the same number an exchange ticker's bid/ask gives.
+  // A plain scan, no sort. Null when a side is empty or the book is crossed.
+  topMid(): number | null {
+    let bid = -Infinity, ask = Infinity;
+    for (const p of this.bids.keys()) if (p > bid) bid = p;
+    for (const p of this.asks.keys()) if (p < ask) ask = p;
+    if (!Number.isFinite(bid) || !Number.isFinite(ask) || ask < bid) return null;
+    return (bid + ask) / 2;
+  }
+
   // The average price of the first `q` bitcoin on each side, then the middle of the two. Null when
   // a side is thinner than q or the book is crossed (a sign it's out of sync).
   depthMid(q = DEPTH): number | null {

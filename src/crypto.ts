@@ -61,7 +61,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { DEFAULT_BLEND, SCORE_POINTS, bandOf, blendProb, eventFor, fairUp, gradeModel, judgingBlend, learnOffset, parseWindow, windowEnd, windowSlug, type Band, type Blend, type Mark } from './cryptomath';
 import { RULES, statusOf, type Status, AT_SIZE_SQL } from './research';
 import { dailyStopHit, drawdownScale, recordKelly, riskLimits, stakeFor } from './fairvalue';
-import { Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
+import { BOOK_FRESH, Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
 import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
 import { signedHeaders, type PmEnv } from './polymarket';
 import { accountPosition, cancelOrder, getOrder, openOrders, placeOrder, previewOrder, type OrderSpec } from './orders';
@@ -98,6 +98,7 @@ const QUOTE_LIVE = 2_500;       // a stream quote this fresh counts as live
 const SPOT_LIVE = 3_000;        // ...and a ticker price this fresh
 const SPOT_OK = 8_000;          // older than this, no fair value at all
 const STREAM_STALE = 20_000;    // a stream silent this long gets reconnected
+const CB_BOOK_EVERY = 250;      // Coinbase's price is read off its order book at most this often (ms)
 const EVAL_EVERY = 250;         // each market re-checked at most 4 times a second
 const HOLD_FOR = 600;           // stream trades: the price has to still be there after this long
 const REENTER_AFTER = 15_000;   // after a sell, wait this long before re-entering that window
@@ -343,6 +344,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private cbRetryAt = 0; private cbFails = 0;
   private gmRetryAt = 0; private gmFails = 0; private gmMsgs = 0;
   private pmMsgs = 0; private cbMsgs = 0; private pmConnects = 0;
+  private cbBookPxAt = 0;   // when Coinbase's price was last read off its order book
   // Housekeeping
   private booted = false;
   private settledAt = 0;
@@ -533,7 +535,9 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         console.log('pm stream error', String((e as any)?.message || e));
       }
     }
-    const cbOk = this.cb && now - this.cb.last < STREAM_STALE;
+    // Coinbase's price comes from its order book while that's live (the ticker goes quiet when held
+    // open from a Worker); the ticker is only the fallback, for when the books are off or down.
+    const cbOk = this.cbBookLive(now) || (this.cb && now - this.cb.last < STREAM_STALE);
     if (!cbOk && now >= this.cbRetryAt) {
       try { await this.connectCb(now); this.cbFails = 0; }
       catch (e) {
@@ -555,6 +559,12 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   }
 
   // ---------- the index copy's order books (shadow mode)
+
+  // Coinbase's order book is connected and was heard from in the last BOOK_FRESH.
+  private cbBookLive(now: number): boolean {
+    const s = this.bk.cb;
+    return !!s.conn && s.book.at > 0 && now - s.book.at <= BOOK_FRESH;
+  }
 
   // Connects in the background: a slow exchange never holds up the price streams or the loop.
   private ensureBooks(now: number) {
@@ -613,6 +623,11 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     try { j = JSON.parse(data); } catch { return; }
     if (j?.event === 'bts:request_reconnect') { s.conn = null; try { conn.ws.close(1000, 'reconnect'); } catch {} return; }
     try { if (BOOK_FEEDS[f].apply(s.book, j)) s.book.at = now; } catch { return; }
+    // Coinbase's price for the bot: the book's best bid and ask, the same mid its ticker gave.
+    if (f === 'cb' && s.book.at === now && now - this.cbBookPxAt >= CB_BOOK_EVERY) {
+      const mid = s.book.topMid();
+      if (mid != null) { this.cbBookPxAt = now; this.cbMsgs++; this.onPrice('cb', mid, now); }
+    }
     // One sample of the copy a second.
     const sec = Math.floor(now / 1000);
     if (sec === this.repLastSec) return;
@@ -1793,7 +1808,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     const stmts: D1PreparedStatement[] = [];
     for (const k of ['crypto_ticks', 'crypto_signals', 'spot', 'gap_skips', 'feed_skips', 'jump_skips', 'event_skips', 'fee_skips'] as Kind[]) if (this.counts[k]) stmts.push(add.bind(k, this.counts[k], this.lastAt[k]));
     if (this.spot) stmts.push(set.bind('btc_cents', Math.round(this.spot.price * 100), now));
-    const pmLive = !!this.pm && now - this.pm.last < STREAM_STALE, cbLive = !!this.cb && now - this.cb.last < STREAM_STALE;
+    const pmLive = !!this.pm && now - this.pm.last < STREAM_STALE, cbLive = this.cbBookLive(now) || (!!this.cb && now - this.cb.last < STREAM_STALE);
     stmts.push(set.bind('pm_stream', pmLive ? Math.round((this.pmMsgs / secs) * 10) : 0, now));  // updates per 10 s
     stmts.push(set.bind('cb_stream', cbLive ? Math.round((this.cbMsgs / secs) * 10) : 0, now));
     const gmLive = !!this.gm && now - this.gm.last < STREAM_STALE;

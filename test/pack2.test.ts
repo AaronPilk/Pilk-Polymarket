@@ -19,6 +19,24 @@ test('order book depth mid: the average price of the first bitcoin on each side'
   assert.equal(thin.depthMid(1), null, 'thinner than the depth');
 });
 
+test("order book top mid: best bid and best ask, the ticker's number", () => {
+  const b = new Book();
+  b.load([['60000', '0.01'], ['59999', '5']], [['60003', '0.02'], ['60010', '4']]);
+  assert.equal(b.topMid(), 60001.5);
+  b.set('bid', 60000, 0);          // best bid gone
+  assert.equal(b.topMid(), (59999 + 60003) / 2);
+  assert.equal(new Book().topMid(), null, 'empty book');
+  const oneSide = new Book(); oneSide.load([['60000', '1']], []);
+  assert.equal(oneSide.topMid(), null, 'one side missing');
+  const crossed = new Book(); crossed.load([['60005', '1']], [['60001', '1']]);
+  assert.equal(crossed.topMid(), null, 'crossed book is out of sync');
+  // Coinbase's feed keeps it current
+  const cb = new Book();
+  applyCoinbase(cb, { type: 'snapshot', product_id: 'BTC-USD', bids: [['60000', '2']], asks: [['60002', '2']] });
+  applyCoinbase(cb, { type: 'l2update', product_id: 'BTC-USD', changes: [['buy', '60001', '1'], ['sell', '60002', '0'], ['sell', '60004', '3']] });
+  assert.equal(cb.topMid(), 60002.5);
+});
+
 test('the three feeds update their books', () => {
   const cb = new Book();
   assert.ok(applyCoinbase(cb, { type: 'snapshot', product_id: 'BTC-USD', bids: [['60000', '2']], asks: [['60002', '2']] }));
