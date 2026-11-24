@@ -90,21 +90,23 @@ def summary(lg, eid):
         j = get(f'{ESPN}/{PATH[lg]}/summary?event={eid}')
         if j is None: return None
         wp = {w.get('playId'): w.get('homeWinPercentage') for w in j.get('winprobability') or []}
-        plays, last = [], None
+        # Every play, not just score changes: the clock stays fresh through scoreless stretches, and each
+        # row's ESPN win probability is the one ESPN showed at that moment (keeping only score changes and
+        # carrying the latest probability forward leaked later plays into earlier rows).
+        plays = []
         for p in j.get('plays') or []:
             wc = p.get('wallclock')
             if not wc: continue
             per = (p.get('period') or {}).get('number')
             row = [int(dt.datetime.fromisoformat(wc.replace('Z', '+00:00')).timestamp()), per,
                    clock_sec((p.get('clock') or {}).get('displayValue')), p.get('homeScore'), p.get('awayScore'), wp.get(p.get('id'))]
-            key = (row[1], row[3], row[4])
-            if key != last: plays.append(row); last = key
-            else: plays[-1][5] = row[5] if row[5] is not None else plays[-1][5]
+            if plays and plays[-1][1:] == row[1:]: continue
+            plays.append(row)
         spread = None
         for pc in j.get('pickcenter') or []:
             if pc.get('spread') is not None: spread = pc.get('spread'); break   # home team's line
         return {'plays': plays, 'spread_home': spread}
-    return cached(f'espn-{lg}-{eid}', fetch)
+    return cached(f'espn2-{lg}-{eid}', fetch)
 
 def main():
     ms = sf.closed_moneylines()

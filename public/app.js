@@ -523,6 +523,7 @@ const STRATEGY_LABEL = {
   hoops_swing_stop: 'Basketball · late swing, cut at half',
   hoops_swing_model: 'Basketball · late swing, math picks',
   hoops_leader_half: 'Basketball · the leader at the half (NBA)',
+  hoops_lead_late: 'Basketball · up 15+ late (college)',
 };
 const variantOf = (id) => (STRATEGY_LABEL[id] || id || '').split(' · ')[1] || '';
 const groupOf = (s) => (s?.startsWith('crypto_') ? 'btc' : s?.startsWith('hoops_') ? 'hoops' : 'other');

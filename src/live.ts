@@ -84,6 +84,7 @@ interface HoopsStrategy {
   target2x?: boolean;             // a resting sell at twice the entry (no fee)
   stopHalf?: boolean;             // sell at the bid if the price falls to half the entry
   leading?: boolean;              // only the team that is ahead
+  minLead?: number;               // ...by at least this many points
   otherAskMax?: number;           // ...and only while the other side asks this much or less
   leagues?: string[];             // only these leagues
   hold?: boolean;                 // no model sell: held to the final
@@ -126,6 +127,16 @@ const HOOPS_STRATEGIES: HoopsStrategy[] = [
   // final, one per game.
   { id: 'hoops_leader_half', maxOpen: 10, trailing: false, leading: true, otherAskMax: 0.1, leagues: ['nba'], maxProgress: 0.6, minDiscount: 0,
     veto: () => -1, priceMin: 0.85, priceMax: 0.985, lateWindow: [20, 24], fixedShare: 0.02, maxAdds: 0, oneShot: true, hold: true },
+  // The big college lead late (Nov 24, scripts/hoops_screen.py): 1,191 in-game rules on 4,290 replayed games with
+  // ESPN's score and clock lined up to the minute prices. Once the replay knows the score only as late as the bot
+  // does (the bot's ESPN feed runs 14-35 s behind the play; the market moves in 1-5 s), waits for a minute with no
+  // score change and fills at the next minute's price, the model and ESPN edges mostly disappear (they were the
+  // replay knowing the score before the market's quote). What survived: a college team up 15+ with 3-10 minutes
+  // left, priced 70-97c (95.7c on average), held to the final: +3.5c a contract over 221 games, and +4.3c over 161
+  // with a 60 s delay. Very few losses, so the board's rarer-result rule will want time. The same family as the 98c
+  // bitcoin favorite and the NBA leader at the half: the market prices the near-certain side a little cheap.
+  { id: 'hoops_lead_late', maxOpen: 10, trailing: false, leading: true, minLead: 15, leagues: ['cbb'], maxProgress: 1, minDiscount: 0,
+    veto: () => -1, priceMin: 0.7, priceMax: 0.97, lateWindow: [3, 10], maxAdds: 0, oneShot: true, hold: true },
 ];
 export const HOOPS_IDS = HOOPS_STRATEGIES.map((s) => s.id);
 const MAX_EDGE = 0.12;          // a bigger "edge" is more likely our data being stale than a gift
@@ -631,6 +642,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
           .filter((v) => !isBlowout(m.league, v.lead, g.period, g.clock) && v.ask >= st.priceMin && v.ask <= st.priceMax && v.edge <= MAX_EDGE)
           .filter((v) => (st.trailing ? v.lead < 0 && v.ask <= v.start - st.minDiscount : true))
           .filter((v) => !st.leading || v.lead > 0)
+          .filter((v) => st.minLead == null || v.lead >= st.minLead)
           .filter((v) => st.otherAskMax == null || otherSideCheap(v.ask, v.bid, st.otherAskMax))
           .filter((v) => !st.favoriteOnly || v.start >= 0.5)
           .filter((v) => !st.deficit || (-v.lead >= st.deficit[0] && -v.lead <= st.deficit[1]))
