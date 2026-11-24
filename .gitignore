@@ -13,3 +13,4 @@ pvm_replay_result.json
 __pycache__/
 strategy_replay_result.json
 strategy_replay_*_result.json
+scale_out_*_result.json
