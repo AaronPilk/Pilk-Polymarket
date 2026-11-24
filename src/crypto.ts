@@ -157,7 +157,9 @@ const feeLive = (p: number) => LIVE_COEF * p * (1 - p);
 //   crypto_fav_98       the one cut that held up in that replay: the side at 98-99c with about 3
 //                       minutes left won 99.5% of 1,893 times at 98.8c (+0.6c a contract after fees, t 3.4),
 //                       and the bot's own quotes show a real seller there. Wins a cent, loses 99c, so the
-//                       board's one-more-loss rule keeps it at one contract for a long time
+//                       board's one-more-loss rule keeps it at one contract for a long time. Retired on
+//                       3 losses in 90 bets on Nov 23 and put back on test that night: the board now waits
+//                       for 10 losses before it calls a bet that rarely loses (research.ts RARE)
 interface CryptoStrategy {
   id: string;
   minEdge: number;            // fair − ask − fee, per contract

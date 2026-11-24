@@ -125,6 +125,30 @@ test('research board: a strategy that has never lost has to absorb one more full
   assert.match(later.reason, /one more full loss/);
 });
 
+test('research board: a bet that rarely loses (or rarely wins) is not called pointless on a handful of results', () => {
+  // 98¢ favorites, +1.8¢ a win and −98¢ a loss, one loss every `every` bets
+  const fav = (n: number, groups: number, every: number) => Array.from({ length: n }, (_, i) => ({ pnl: i % every === every - 1 ? -0.98 : 0.018, cost: 0.98, group: i % groups }));
+  // Nov 23's live record: 87 won, 3 lost. Nothing to show by t, but 3 losses can't say that yet
+  const thin = judge('crypto_fav_98', fav(90, 22, 30), 'btc');
+  assert.ok(thin.t! < 0.5, `t ${thin.t}`);
+  assert.equal(thin.status, 'testing');
+  assert.match(thin.reason, /Only 3 losses so far: a bet that rarely loses needs 10/);
+  // 10 losses in 600 and still nothing: retired like anything else
+  const enough = judge('crypto_fav_98', fav(600, 60, 55), 'btc');
+  assert.ok(enough.t! < 0.5, `t ${enough.t}`);
+  assert.equal(enough.status, 'retired');
+  assert.match(enough.reason, /Nothing to show after 600 bets/);
+  // losing beyond luck doesn't wait for 10 losses: 6 in 60 retires it
+  const bad = judge('crypto_fav_98', fav(60, 12, 10), 'btc');
+  assert.equal(bad.status, 'retired');
+  assert.match(bad.reason, /Losing beyond luck/);
+  // the mirror: 5¢ longshots with 3 wins in 90
+  const shot = Array.from({ length: 90 }, (_, i) => ({ pnl: i % 30 === 29 ? 0.95 : -0.05, cost: 0.05, group: i % 18 }));
+  const long = judge('crypto_test_v1', shot, 'btc');
+  assert.equal(long.status, 'testing');
+  assert.match(long.reason, /Only 3 wins so far: a bet that rarely wins/);
+});
+
 test('quick score: the move toward each bet a minute after it, from the 30-second marks', async () => {
   const { DatabaseSync } = await import('node:sqlite');
   const db = new DatabaseSync(':memory:');

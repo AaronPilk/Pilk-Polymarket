@@ -1,8 +1,8 @@
 // The research board. Every strategy is judged on the bets it placed under the current rules, and the
 // verdict decides how it bets next:
 //   retired    losing beyond luck (even its best case is a loss), still nothing to show after three
-//              times the bets it needs to be judged, or an idea the evidence already contradicts.
-//              It stops betting.
+//              times the bets it needs to be judged and at least 10 of its rarer result, or an idea
+//              the evidence already contradicts. It stops betting.
 //   testing    not enough bets to judge, or no clear answer yet. One contract a bet, so a test costs
 //              pennies while it gathers data.
 //   promising  ahead even in its worst case (mean minus 1.64 standard errors above zero, on the record
@@ -26,6 +26,23 @@ export const LAB: Record<Book, { judge: number; groups: number; proven: number }
   sports: { judge: 30, groups: 8, proven: 100 },    // groups: games
 };
 const Z = 1.64;   // best case = mean + 1.64 standard errors, worst case = mean - 1.64 (95% one-sided)
+// "Nothing to show" also needs this many of the strategy's rarer result: losses for a favorite that
+// rarely loses, wins for a longshot that rarely wins. A 98¢ favorite loses about twice in 100 bets, so
+// 90 bets hold two or three losses and one more or fewer flips its t: that's a coin toss, not a
+// verdict (Nov 23: crypto_fav_98 was retired on 3 losses in 90). Everything else on the board has
+// dozens of each by 90 bets. Losing beyond luck still retires a favorite on the real record any time.
+const RARE = 10;
+
+// Wins and losses on the record (a bet that broke exactly even is neither).
+function outcomes(rows: ReadyRow[]) {
+  let wins = 0, losses = 0;
+  for (const r of rows) {
+    if (!((r.cost || 0) > 0)) continue;
+    const x = r.pnl || 0;
+    if (x > 0) wins++; else if (x < 0) losses++;
+  }
+  return { wins, losses };
+}
 
 // Retired on the evidence of Nov 22, before the board existed.
 export const RETIRED: Record<string, string> = {
@@ -111,13 +128,18 @@ export function judge(id: string, rows: ReadyRow[], book: Book): Verdict {
   if (s.mean + Z * s.se < 0) {
     return { ...base, status: 'retired', reason: `Losing beyond luck: ${line}, best case ${pct(s.mean + Z * s.se)}.` };
   }
-  if (s.n >= lab.judge * 3 && t < 0.5) {
+  const { wins, losses } = outcomes(rows), rare = Math.min(wins, losses);
+  const stale = s.n >= lab.judge * 3 && t < 0.5;
+  if (stale && rare >= RARE) {
     return { ...base, status: 'retired', reason: `Nothing to show after ${s.n} bets: ${pct(s.mean)} a dollar (t ${t.toFixed(1)}). Fees for no edge.` };
   }
   const gt = g.mean != null && g.se != null && g.se > 0 ? g.mean / g.se : null;
   if (s.n >= lab.proven && gt != null && gt >= 2 && s.pnl > 0) return { ...base, status: 'proven', reason: `Ahead beyond luck: ${line} (t ${gt.toFixed(1)} with one more full loss counted).` };
   if (g.mean != null && g.se != null && g.mean - Z * g.se > 0 && s.pnl > 0) return { ...base, status: 'promising', reason: `Ahead even in its worst case: ${line}, worst case ${pct(g.mean - Z * g.se)} even after one more full loss. Bets its normal size.` };
-  return { ...base, status: 'testing', reason: `No clear answer yet: ${line} (t ${t.toFixed(1)}). Still one contract a bet.` };
+  const lose = losses <= wins;
+  const few = lose ? (rare === 1 ? 'loss' : 'losses') : (rare === 1 ? 'win' : 'wins');
+  const wait = stale ? ` Only ${rare} ${few} so far: a bet that rarely ${lose ? 'loses' : 'wins'} needs ${RARE} before the board can call it.` : '';
+  return { ...base, status: 'testing', reason: `No clear answer yet: ${line} (t ${t.toFixed(1)}).${wait} Still one contract a bet.` };
 }
 
 export function board(rowsBy: Map<string, ReadyRow[]>, ids: string[], book: Book, now = Date.now(), quickBy?: Map<string, Quick>) {
