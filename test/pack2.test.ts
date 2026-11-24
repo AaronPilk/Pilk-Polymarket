@@ -184,3 +184,29 @@ test('a test bet is 3% of the account, inside the ladder', async () => {
   // at the floor, nothing
   near(testStake({ equity: 50, peak: 100, available: 50, openNet: 0 }), 0);
 });
+
+test("Aaron's price tiers: most around 10¢, less at 5¢ and 20¢+, never past the ladder", async () => {
+  const { tierShare, tierStake, tierQty, TIERED } = await import('../src/fairvalue.ts');
+  const near = (a: number, b: number) => assert.ok(Math.abs(a - b) < 1e-9, `${a} vs ${b}`);
+  const acct = { equity: 100, peak: 100, available: 100, openNet: 0 };
+  near(tierShare(0.05), 0.05);
+  near(tierShare(0.10), 0.10);
+  near(tierShare(0.15), 0.075);
+  near(tierShare(0.25), 0.05);
+  near(tierShare(0.02), 0);      // under 3¢: no bet (his held lottery tickets: 1 of 37)
+  near(tierShare(0.30), 0);      // over 25¢: not this model
+  near(tierStake({ ...acct, price: 0.10 }), 10);   // $10 at 10¢ on a $100 account, the ladder's per-bet limit
+  near(tierStake({ ...acct, price: 0.05 }), 5);
+  near(tierStake({ ...acct, price: 0.22 }), 5);
+  // the 30% open limit leaves $4 of room
+  near(tierStake({ ...acct, available: 74, openNet: 26, price: 0.10 }), 4);
+  // half way down to the floor, half size; at the floor, nothing; Aaron's cap wins
+  near(tierStake({ equity: 75, peak: 100, available: 75, openNet: 0, price: 0.10 }), 3.75);
+  near(tierStake({ equity: 50, peak: 100, available: 50, openNet: 0, price: 0.10 }), 0);
+  near(tierStake({ ...acct, ceiling: 2, price: 0.10 }), 2);
+  // the fee comes out of the stake: $10 at 10¢ is 92 contracts, $9.20 + $0.79 fee
+  assert.equal(tierQty(10, 0.10), 92);
+  assert.ok(92 * 0.10 + 92 * 0.095 * 0.10 * 0.90 <= 10);
+  assert.equal(tierQty(0, 0.10), 0);
+  assert.ok(TIERED.has('hoops_tier_2x') && TIERED.has('hoops_tier_3x') && TIERED.has('hoops_tier_reload'));
+});

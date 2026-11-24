@@ -202,6 +202,31 @@ export function stakeFor(o: {
 // bet less than this. Paper only: real money keeps its own sizing.
 export const TEST_SHARE = 0.03;
 
+// Aaron's price tiers (Nov 24): size by the price, not a flat 3%. A 10-point move is 3x from 5¢ but 1.4x from
+// 25¢, so he bets the most around 10¢, less at 5¢ and at 20¢+. [from, to, share of the account]. The tier
+// accounts (hoops_tier_*) always bet this size, whatever the board's status, still inside the ladder: never over
+// the per-bet or open limit, shrunk in a drawdown like every bet, the fee counted in the stake.
+export type Tier = [number, number, number];
+export const AARON_TIERS: Tier[] = [[0.03, 0.07, 0.05], [0.07, 0.13, 0.10], [0.13, 0.20, 0.075], [0.20, 0.251, 0.05]];
+export const TIERED = new Set(['hoops_tier_2x', 'hoops_tier_3x', 'hoops_tier_reload']);
+export function tierShare(price: number, tiers: Tier[] = AARON_TIERS): number {
+  const t = tiers.find(([lo, hi]) => price >= lo && price < hi);
+  return t ? t[2] : 0;
+}
+export function tierStake(o: { equity: number; peak: number; available: number; openNet: number; ceiling?: number | null; price: number }, tiers: Tier[] = AARON_TIERS): number {
+  const share = tierShare(o.price, tiers);
+  if (!share || !(o.equity > 0)) return 0;
+  const peak = Math.max(o.peak, o.equity), lim = riskLimits(peak);
+  let room = Math.min(o.available, o.equity * lim.bet, Math.max(0, o.equity * lim.open - o.openNet));
+  if (o.ceiling != null && o.ceiling > 0) room = Math.min(room, o.ceiling);
+  return Math.max(0, Math.min(o.equity * Math.min(share, lim.bet) * drawdownScale(o.equity, peak, lim.dd), room));
+}
+// Contracts a tier stake buys, the taker fee included so the bet never goes past its share.
+export function tierQty(stake: number, ask: number, coef = TAKER_COEF): number {
+  if (!(stake > 0) || !(ask > 0)) return 0;
+  return Math.floor(stake / (ask + coef * ask * (1 - ask)));
+}
+
 // What a test bet stakes: TEST_SHARE of the account, shrunk like every bet as the account falls toward
 // its floor, and never past the ladder's room (one bet, everything open, cash on hand, Aaron's cap).
 export function testStake(o: { equity: number; peak: number; available: number; openNet: number; ceiling?: number | null; depth?: number | null; price?: number }, share = TEST_SHARE): number {

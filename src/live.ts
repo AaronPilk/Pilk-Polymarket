@@ -20,7 +20,7 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import { ESPN_PATHS, fetchScoreboard, gameLine, gameState, longSide, matchEvent } from './espn';
-import { LEAGUE, dailyStopHit, drawdownScale, edgeFloor, isBlowout, otherSideCheap, riskLimits, shareLeft, sportFair, stakeFor, testStake } from './fairvalue';
+import { AARON_TIERS, LEAGUE, dailyStopHit, drawdownScale, edgeFloor, isBlowout, otherSideCheap, riskLimits, shareLeft, sportFair, stakeFor, testStake, tierQty, tierStake, type Tier } from './fairvalue';
 import { addToPosition, bankroll, closePosition, loadOpen, openPosition, settlePosition, type Position } from './paper';
 import { SPORTS_POINTS, SPORTS_POINT_TOL } from './sportsgrade';
 import { RULES, statusOf, type Status } from './research';
@@ -88,6 +88,9 @@ interface HoopsStrategy {
   otherAskMax?: number;           // ...and only while the other side asks this much or less
   leagues?: string[];             // only these leagues
   hold?: boolean;                 // no model sell: held to the final
+  tiers?: Tier[];                 // Aaron's price tiers: always this size (fairvalue.ts tierStake), never the 3% test size
+  targetMult?: number;            // a resting sell at this multiple of the entry (no fee); no model sell
+  reload?: number;                // buy back into the same game after winning cash-outs only, up to this many positions a game
 }
 // Each runs its own paper account and can hold its own position in any game, up to 10 games at once
 // (Nov 24: Aaron wants the testing maxed out; at 3% a bet the ladder's 30% open limit caps it about there).
@@ -117,6 +120,22 @@ const HOOPS_STRATEGIES: HoopsStrategy[] = [
     lateWindow: [3, 12], deficit: [3, 9], fixedShare: 0.02, target2x: true, stopHalf: true, maxAdds: 0, oneShot: true },
   { id: 'hoops_swing_model', maxOpen: 10, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => 0.03, priceMin: 0.08, priceMax: 0.25,
     lateWindow: [3, 12], deficit: [3, 9], fixedShare: 0.02, target2x: true, maxAdds: 0, oneShot: true },
+  // Aaron's price-tier model (Nov 24), its own three accounts next to the tests above, which it doesn't touch.
+  // His words: he trades the Polymarket price, not the game; buys the trailing team cheap and sells the bounce;
+  // and sizes by the price, because a 10-point move is 3x from 5¢ but 1.4x from 25¢ (AARON_TIERS: 5% of the
+  // account at 3-7¢, 10% at 7-13¢, 7.5% at 13-20¢, 5% at 20-25¢). His record since May (scripts/aaron_study.py):
+  // cheap buys he sold on the bounce made +$173 on $128 (12 of 19), the ones he held to the end lost $279 of $343
+  // (1 of 37), so none of these ever holds for the result on purpose: a resting sell at 2x or 3x, or the final.
+  // Second half only (3-20 minutes left), trailing, no score or model filter (he doesn't watch the game; the
+  // math only blocks prices it rates 8¢+ rich, which is more likely bad data). The reload version is his
+  // house-money move: after a winning cash-out it can buy the same team back if the price falls into the band
+  // again, up to three times a game, never after a loss (his own cheap re-buys after a win: 1 of 11, -$40).
+  { id: 'hoops_tier_2x', maxOpen: 10, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => -0.08, priceMin: 0.03, priceMax: 0.25,
+    lateWindow: [3, 20], tiers: AARON_TIERS, targetMult: 2, maxAdds: 0, oneShot: true },
+  { id: 'hoops_tier_3x', maxOpen: 10, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => -0.08, priceMin: 0.03, priceMax: 0.25,
+    lateWindow: [3, 20], tiers: AARON_TIERS, targetMult: 3, maxAdds: 0, oneShot: true },
+  { id: 'hoops_tier_reload', maxOpen: 10, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => -0.08, priceMin: 0.03, priceMax: 0.25,
+    lateWindow: [3, 20], tiers: AARON_TIERS, targetMult: 2, maxAdds: 0, reload: 3 },
   // The leader at the half (NBA), the other side of Aaron's halftime scalp. On 4,079 replayed games
   // (scripts/q3_scalp_replay.py, Nov 23) a team behind at the half and down to 10¢ or less won less
   // often than its price said, and backing the team ahead made about +2¢ a contract in the NBA (240
@@ -592,10 +611,11 @@ export class LiveFeed extends DurableObject<LiveEnv> {
             await closePosition(db, held, { price: held.take_profit, coef: COEF, maker: true, reason: `take-profit at ${cents(held.take_profit)}`, now });
             continue;
           }
-          if (st.target2x && held.avg_entry != null) {
-            const target = Math.min(0.99, Math.round(held.avg_entry * 2 * 100) / 100);
+          const mult = st.targetMult ?? (st.target2x ? 2 : null);
+          if (mult && held.avg_entry != null) {
+            const target = Math.min(0.99, Math.round(held.avg_entry * mult * 100) / 100);
             if (v.bid >= target) {
-              await closePosition(db, held, { price: target, coef: COEF, maker: true, reason: `2x cash-out at ${cents(target)} (in at ${cents(held.avg_entry)}), ${where(v.lead)}`, now });
+              await closePosition(db, held, { price: target, coef: COEF, maker: true, reason: `${mult}x cash-out at ${cents(target)} (in at ${cents(held.avg_entry)}), ${where(v.lead)}`, now });
               continue;
             }
           }
@@ -612,7 +632,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
           }
           // The model's own sell when the price runs above its fair. The comeback and late-swing plays exit only
           // on their own rules (or the final): the model selling them into a growing deficit isn't Aaron's method.
-          if (!st.target2x && st.comeback == null && !st.hold && fresh && calm && settled && minsLeft > 3 && v.bid >= v.fair + feePer(v.bid) + 0.04) {
+          if (!st.target2x && !st.targetMult && st.comeback == null && !st.hold && fresh && calm && settled && minsLeft > 3 && v.bid >= v.fair + feePer(v.bid) + 0.04) {
             await closePosition(db, held, { price: v.bid, coef: COEF, maker: false, reason: `above fair: bid ${cents(v.bid)} vs fair ${cents(v.fair)}, ${where(v.lead)}`, now });
             continue;
           }
@@ -650,6 +670,12 @@ export class LiveFeed extends DurableObject<LiveEnv> {
           .sort((x, y) => y.edge - x.edge)[0];
         if (!pick) continue;
         if (st.oneShot && await db.prepare("SELECT 1 FROM bot_positions WHERE strategy = ? AND market_slug = ? AND status != 'open' LIMIT 1").bind(st.id, m.slug).first()) continue;
+        if (st.reload) {
+          // Back in only after winning cash-outs (house money), and at most `reload` positions in one game.
+          const prior = await db.prepare("SELECT count(*) AS n, sum(CASE WHEN coalesce(pnl, 0) <= 0 THEN 1 ELSE 0 END) AS bad FROM bot_positions WHERE strategy = ? AND market_slug = ? AND status != 'open'")
+            .bind(st.id, m.slug).first<{ n: number; bad: number | null }>();
+          if (prior && (prior.n >= st.reload || (prior.bad ?? 0) > 0)) continue;
+        }
         const bank = await bankroll(db, allocation, now, st.id);
         if (dailyStopHit(bank.equity, bank.today, bank.peak)) continue;
         let stake: number;
@@ -663,16 +689,22 @@ export class LiveFeed extends DurableObject<LiveEnv> {
         // Testing: 3% of the account a bet (TEST_SHARE) until the board has enough to judge; promising and
         // proven strategies bet their own size, never less than that.
         const test = Math.floor(testStake({ equity: bank.equity, peak: bank.peak, available: bank.available, openNet: bank.openNet, ceiling: ceiling(this.env) }) / pick.ask);
-        const qty = status === 'testing' ? test : Math.max(test, Math.floor(stake / pick.ask));
+        // Aaron's tier accounts bet their price tier, whatever the board says (retired ones never get here).
+        const qty = st.tiers
+          ? tierQty(tierStake({ equity: bank.equity, peak: bank.peak, available: bank.available, openNet: bank.openNet, ceiling: ceiling(this.env), price: pick.ask }, st.tiers), pick.ask, COEF)
+          : status === 'testing' ? test : Math.max(test, Math.floor(stake / pick.ask));
         if (qty < 1) continue;
-        const why = st.trailing
+        const why = st.tiers
+          ? `price tier: ${cents(pick.ask)}, ${Math.round((st.tiers.find(([lo, hi]) => pick.ask >= lo && pick.ask < hi)?.[2] ?? 0) * 1000) / 10}% of the account, sell at ${st.targetMult ?? 2}x; ${where(pick.lead)}`
+          : st.trailing
           ? `behind and ${cents(pick.start - pick.ask)} under tip-off; fair ${cents(pick.fair)} vs ask ${cents(pick.ask)}, ${where(pick.lead)}`
           : st.leading && st.otherAskMax != null
             ? `ahead at the half, the other side at ${cents(1 - pick.bid)}; ask ${cents(pick.ask)}, ${where(pick.lead)}`
             : `fair ${cents(pick.fair)} vs ask ${cents(pick.ask)}, ${where(pick.lead)}`;
         const pos = await openPosition(db, {
           strategy: st.id, slug: m.slug, title: `${m.long_team || 'Home'} vs. ${m.short_team || 'Away'}`, side: pick.side,
-          sideName: pick.team, ask: pick.ask, qty, coef: COEF, reason: why, now, tpBelow: st.target2x ? 1 : undefined, meta: { rules: RULES, status },
+          sideName: pick.team, ask: pick.ask, qty, coef: COEF, reason: why, now, tpBelow: st.target2x || st.targetMult === 2 ? 1 : undefined,
+          meta: st.tiers ? { rules: RULES, status, tier: Math.round(qty * pick.ask * 100) / 100 } : { rules: RULES, status },
         });
         this.open.push(pos);
         heldHere.push(pos);

@@ -14,7 +14,7 @@
 // The top three are the proven and promising strategies with the best worst case (mean minus one
 // standard error, as a return per dollar bet).
 import { returnStats, withOneLoss, type ReadyRow } from './ready';
-import { TAKER_COEF } from './fairvalue';
+import { TAKER_COEF, TIERED } from './fairvalue';
 
 // Positions opened under the rules this board judges carry meta.rules >= RULES. Bump it when the
 // rules change enough that older bets no longer say anything about the new ones.
@@ -122,7 +122,7 @@ export function judge(id: string, rows: ReadyRow[], book: Book): Verdict {
   const lab = LAB[book], unit = book === 'btc' ? 'hours' : 'games';
   if (s.n < lab.judge || s.groups < lab.groups || s.mean == null || s.se == null || !(s.se > 0)) {
     const more = s.n < lab.judge ? `${s.n} of ${lab.judge} bets on the new rules` : s.groups < lab.groups ? `${s.groups} of ${lab.groups} ${unit} so far` : 'no spread in its results yet';
-    return { ...base, status: 'testing', reason: `Testing at 3% of its account a bet: ${more}.` };
+    return { ...base, status: 'testing', reason: `Testing at ${TIERED.has(id) ? 'its price-tier size (5-10% of its account)' : '3% of its account'} a bet: ${more}.` };
   }
   const t = s.mean / s.se, line = `${pct(s.mean)} a dollar over ${s.n} bets`;
   if (s.mean + Z * s.se < 0) {
@@ -139,7 +139,7 @@ export function judge(id: string, rows: ReadyRow[], book: Book): Verdict {
   const lose = losses <= wins;
   const few = lose ? (rare === 1 ? 'loss' : 'losses') : (rare === 1 ? 'win' : 'wins');
   const wait = stale ? ` Only ${rare} ${few} so far: a bet that rarely ${lose ? 'loses' : 'wins'} needs ${RARE} before the board can call it.` : '';
-  return { ...base, status: 'testing', reason: `No clear answer yet: ${line} (t ${t.toFixed(1)}).${wait} Still testing at 3% a bet.` };
+  return { ...base, status: 'testing', reason: `No clear answer yet: ${line} (t ${t.toFixed(1)}).${wait} Still testing at ${TIERED.has(id) ? 'its price-tier size' : '3% a bet'}.` };
 }
 
 export function board(rowsBy: Map<string, ReadyRow[]>, ids: string[], book: Book, now = Date.now(), quickBy?: Map<string, Quick>) {

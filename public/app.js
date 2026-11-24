@@ -522,6 +522,9 @@ const STRATEGY_LABEL = {
   hoops_swing_v1: 'Basketball · late swing, cash out at 2×',
   hoops_swing_stop: 'Basketball · late swing, cut at half',
   hoops_swing_model: 'Basketball · late swing, math picks',
+  hoops_tier_2x: 'Basketball · your price tiers, sell at 2×',
+  hoops_tier_3x: 'Basketball · your price tiers, sell at 3×',
+  hoops_tier_reload: 'Basketball · your price tiers, 2× and buy back in',
   hoops_leader_half: 'Basketball · the leader at the half (NBA)',
   hoops_lead_late: 'Basketball · up 15+ late (college)',
 };
