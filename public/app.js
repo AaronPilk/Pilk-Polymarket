@@ -948,8 +948,12 @@ function compareCard(c) {
 
 // Ready for real money? Five checks on the strategy that would trade it, each asking whether the
 // result could be luck. All green means it has been consistent on paper; the switch is still Aaron's.
-function readyCard(r) {
+function readyCard(r, lab) {
   if (!r) return '';
+  // A strategy the research board retired never trades, so its card is a frozen record, not a
+  // candidate (Nov 23: price vs math was retired on a 30-day replay but still named by LIVE_STRATEGY)
+  const verdict = lab?.strategies?.[r.strategy];
+  const retired = verdict?.status === 'retired';
   const need = r.need || { windows: 300, edgeT: 2, trades: 200, block: 50, profitT: 2, maxDD: 0.2, games: 40 };
   const sports = r.kind === 'sports';
   const t = (x) => (x == null ? '–' : Number(x).toFixed(1));
@@ -966,7 +970,9 @@ function readyCard(r) {
   ];
   const done = rows.filter(([k]) => r.ok[k]).length;
   return `<div class="card">
-    <div class="row"><div class="row-main"><div class="row-title">${r.ready ? 'Ready for real money' : `Not yet: ${done} of 5 checks`}</div><div class="row-sub wrap">${esc(variantOf(r.strategy) || r.strategy)} on paper${sports ? '' : ' since the fix'}. All five green means it has been consistent, not lucky.${sports ? ' The Sports bot has no real-money engine yet; this says when it is worth building.' : ' The switch is still yours.'}</div></div><div class="row-end"><span class="pill ${r.ready ? 'won' : 'open'}">${r.ready ? 'Ready' : 'Paper'}</span></div></div>
+    ${retired
+    ? `<div class="row"><div class="row-main"><div class="row-title">Retired: not a candidate</div><div class="row-sub wrap">${esc(variantOf(r.strategy) || r.strategy)} was retired by the research board. ${esc(/[.!?]$/.test(verdict.reason || '') ? verdict.reason : `${verdict.reason || ''}.`)} The checks below are its last record and won't change. Nothing goes live until another strategy proves itself on the board.</div></div><div class="row-end"><span class="pill lost">Retired</span></div></div>`
+    : `<div class="row"><div class="row-main"><div class="row-title">${r.ready ? 'Ready for real money' : `Not yet: ${done} of 5 checks`}</div><div class="row-sub wrap">${esc(variantOf(r.strategy) || r.strategy)} on paper${sports ? '' : ' since the fix'}. All five green means it has been consistent, not lucky.${sports ? ' The Sports bot has no real-money engine yet; this says when it is worth building.' : ' The switch is still yours.'}</div></div><div class="row-end"><span class="pill ${r.ready ? 'won' : 'open'}">${r.ready ? 'Ready' : 'Paper'}</span></div></div>`}
     ${rows.map(([k, label, detail]) => `<div class="row check-row"><span class="check ${r.ok[k] ? 'ok' : ''}">${r.ok[k] ? '✓' : ''}</span><div class="row-main"><div class="row-title">${label}</div><div class="row-sub wrap">${esc(detail)}</div></div></div>`).join('')}
   </div>`;
 }
@@ -1072,7 +1078,7 @@ function botRest(b) {
 
     ${L?.on ? '' : `<div class="section">
       <div class="section-title">Ready for real money?<small>${esc(variantOf(b.ready?.strategy) || '')}</small></div>
-      ${readyCard(b.ready)}
+      ${readyCard(b.ready, b.lab)}
     </div>`}
 
     ${book === 'btc' ? `<div class="section">

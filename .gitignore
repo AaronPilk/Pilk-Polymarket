@@ -16,3 +16,5 @@ strategy_replay_*_result.json
 scale_out_*_result.json
 chart_replay_*_result.json
 swing_flip_result.json
+q3_scalp_result.json
+late_swing_result.json
