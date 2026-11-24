@@ -202,6 +202,13 @@ export function edgeFloor(st: { veto: (progress: number) => number; leaderEdge?:
   return lead > 0 && st.leaderEdge ? Math.max(v, st.leaderEdge) : v;
 }
 
+// From one side's bid and ask: is the other side down to otherAskMax or less (its ask is 1 - this bid),
+// on a book no wider than maxWidth? The leader at the half (live.ts hoops_leader_half) buys the team
+// ahead only then; the replay dropped books wider than 6¢ the same way.
+export function otherSideCheap(ask: number, bid: number, otherAskMax: number, maxWidth = 0.06): boolean {
+  return 1 - bid <= otherAskMax + 1e-9 && ask - bid <= maxWidth + 1e-9;
+}
+
 // A strategy's own record as a bet size. Kelly for a bet that returns R per dollar is about
 // E[R] / E[R²]; the record bets on its return minus one standard error (hours or games as the unit,
 // see returnStats), so only on edge it has shown beyond luck, and nothing until it has 50+ closed

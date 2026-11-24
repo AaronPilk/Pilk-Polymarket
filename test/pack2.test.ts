@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from '../src/replica.ts';
-import { edgeFloor, recordKelly, stakeFor } from '../src/fairvalue.ts';
+import { edgeFloor, otherSideCheap, recordKelly, stakeFor } from '../src/fairvalue.ts';
 import { returnStats } from '../src/ready.ts';
 import { takeProfitFor } from '../src/paper.ts';
 import { gradeSports, type SportsMark } from '../src/sportsgrade.ts';
@@ -159,4 +159,12 @@ test('takeProfitFor: the late swing rests its 2x sell at any entry; other strate
   assert.equal(takeProfitFor(0.2), null);
   assert.equal(takeProfitFor(0.2, 1), 0.4);
   assert.equal(takeProfitFor(0.6, 1), 0.99);
+});
+
+test('otherSideCheap: the leader at the half only buys while the other side is down to 10¢ on a tight book', () => {
+  assert.equal(otherSideCheap(0.94, 0.92, 0.1), true);     // the other side asks 8¢, book 2¢ wide
+  assert.equal(otherSideCheap(0.91, 0.9, 0.1), true);      // exactly 10¢
+  assert.equal(otherSideCheap(0.9, 0.88, 0.1), false);     // the other side asks 12¢
+  assert.equal(otherSideCheap(0.97, 0.9, 0.1), false);     // 7¢ wide: the replay dropped these
+  assert.equal(otherSideCheap(0.96, 0.9, 0.1), true);      // 6¢ wide is allowed
 });
