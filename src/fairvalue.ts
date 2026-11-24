@@ -195,6 +195,23 @@ export function stakeFor(o: {
   return Math.max(0, Math.min(k, cap));
 }
 
+// Test bets (Nov 24, Aaron: "on a $100 account we need to be placing a little bit larger bets"): a paper
+// strategy the research board is still testing stakes this share of its own account, not one contract.
+// The verdict is a return per dollar, so the size doesn't change what the board learns; it keeps paper
+// fees and swings close to what a $100 account would really see. Promising and proven strategies never
+// bet less than this. Paper only: real money keeps its own sizing.
+export const TEST_SHARE = 0.03;
+
+// What a test bet stakes: TEST_SHARE of the account, shrunk like every bet as the account falls toward
+// its floor, and never past the ladder's room (one bet, everything open, cash on hand, Aaron's cap).
+export function testStake(o: { equity: number; peak: number; available: number; openNet: number; ceiling?: number | null; depth?: number | null; price?: number }, share = TEST_SHARE): number {
+  const peak = Math.max(o.peak, o.equity), lim = riskLimits(peak);
+  let room = Math.min(o.available, o.equity * lim.bet, Math.max(0, o.equity * lim.open - o.openNet));
+  if (o.ceiling != null && o.ceiling > 0) room = Math.min(room, o.ceiling);
+  if (o.depth != null && o.depth > 0 && o.price) room = Math.min(room, o.depth * o.price);   // never more than the book offers
+  return Math.max(0, Math.min(o.equity * share * drawdownScale(o.equity, peak, lim.dd), room));
+}
+
 // The least edge (fair - ask - fee) a strategy takes on a side: its veto, raised to the leader bar for a
 // team that is ahead. A negative veto lets through prices the math rates slightly rich (Aaron's raw plays).
 export function edgeFloor(st: { veto: (progress: number) => number; leaderEdge?: number }, progress: number, lead: number): number {

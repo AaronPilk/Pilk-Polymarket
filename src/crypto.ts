@@ -60,7 +60,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DEFAULT_BLEND, SCORE_POINTS, bandOf, blendProb, eventFor, fairUp, gradeModel, judgingBlend, learnOffset, parseWindow, windowEnd, windowSlug, type Band, type Blend, type Mark } from './cryptomath';
 import { RULES, statusOf, type Status, AT_SIZE_SQL } from './research';
-import { dailyStopHit, drawdownScale, recordKelly, riskLimits, stakeFor } from './fairvalue';
+import { dailyStopHit, drawdownScale, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
 import { BOOK_FRESH, Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
 import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
 import { signedHeaders, type PmEnv } from './polymarket';
@@ -157,7 +157,7 @@ const feeLive = (p: number) => LIVE_COEF * p * (1 - p);
 //   crypto_fav_98       the one cut that held up in that replay: the side at 98-99c with about 3
 //                       minutes left won 99.5% of 1,893 times at 98.8c (+0.6c a contract after fees, t 3.4),
 //                       and the bot's own quotes show a real seller there. Wins a cent, loses 99c, so the
-//                       board's one-more-loss rule keeps it at one contract for a long time. Retired on
+//                       board's one-more-loss rule keeps it at test size for a long time. Retired on
 //                       3 losses in 90 bets on Nov 23 and put back on test that night: the board now waits
 //                       for 10 losses before it calls a bet that rarely loses (research.ts RARE)
 interface CryptoStrategy {
@@ -173,6 +173,8 @@ interface CryptoStrategy {
   kelly?: { fraction: number };
   makerExit?: boolean;        // exit with a resting sell at fair + exitAbove (no fee) instead of selling at the bid
   fav?: boolean;              // the late favorite: no math or blend check, and it sizes only on its own record
+  series?: string[];          // only these window lengths (default: all)
+  calm?: number;              // only while the window's mid has moved this much or less over the last 30 s
 }
 const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_fair_v1', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15, exitAbove: 0.03, tauMin: 75 },
@@ -188,6 +190,23 @@ const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_fav_late', minEdge: -1, priceMin: 0.95, priceMax: 0.98, tpBelow: 0, exitAbove: null, tauMin: 90, tauMax: 120, fav: true },
   { id: 'crypto_fav_last', minEdge: -1, priceMin: 0.95, priceMax: 0.98, tpBelow: 0, exitAbove: null, tauMin: 30, tauMax: 90, fav: true },
   { id: 'crypto_fav_98', minEdge: -1, priceMin: 0.98, priceMax: 0.99, tpBelow: 0, exitAbove: null, tauMin: 150, tauMax: 210, fav: true },
+  // Nov 24, Aaron: "max out the testing". scripts/crypto_screen.py scored 595 price-only rules on 32 days of
+  // Bitcoin, XRP and gold windows (26,795 windows); the only ones up in both halves of the month were the
+  // 98-99c favorite at different moments, so these test its timing on its own accounts:
+  //   crypto_fav_99_1m   the 98-99c side with about a minute left (5m: 5,474 bets, +0.43c a contract,
+  //                      t 4.3; 15m: 2,221, +0.63c, t 5.3; 1h: 625, +0.61c). The live fill needs a real ask
+  //                      with size, which the replay's minute points can't promise this close to the end
+  //   crypto_fav_98_1h   the 98-99c side of the hourly window with 3.5-14 minutes left (438 of 438 won at
+  //                      4-3 minutes, 155 of 155 at 14-5)
+  //   crypto_fav_98_calm crypto_fav_98's moment, but only when the window's price has held within 1c for
+  //                      30 s: live, crypto_fav_98 lost 3 of 112 where the replay says about 0.6, which looks
+  //                      like buying favorites while they're sliding through 98c
+  //   crypto_fav_96_15m  the 95-98c side of a 15-minute window with 5-9 minutes left (139 bets, 99.3% won at
+  //                      95.9c, +3.0c, t 4.2; the second half's t was 1.9, a near miss)
+  { id: 'crypto_fav_99_1m', minEdge: -1, priceMin: 0.98, priceMax: 0.99, tpBelow: 0, exitAbove: null, tauMin: 50, tauMax: 140, fav: true },
+  { id: 'crypto_fav_98_1h', minEdge: -1, priceMin: 0.98, priceMax: 0.99, tpBelow: 0, exitAbove: null, tauMin: 210, tauMax: 840, fav: true, series: ['1h'] },
+  { id: 'crypto_fav_98_calm', minEdge: -1, priceMin: 0.98, priceMax: 0.99, tpBelow: 0, exitAbove: null, tauMin: 150, tauMax: 210, fav: true, calm: 0.01 },
+  { id: 'crypto_fav_96_15m', minEdge: -1, priceMin: 0.95, priceMax: 0.98, tpBelow: 0, exitAbove: null, tauMin: 300, tauMax: 540, fav: true, series: ['15m'] },
 ];
 const BY_ID = new Map(CRYPTO_STRATEGIES.map((s) => [s.id, s]));
 export const CRYPTO_IDS = [...CRYPTO_STRATEGIES.map((s) => s.id), 'crypto_ladder_v1'];
@@ -303,7 +322,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   // for the last 4 minutes; each starts 50/50 and is replaced once its band has 100 graded windows.
   private blends: Record<Band, Blend> = { early: { ...DEFAULT_BLEND }, late: { ...DEFAULT_BLEND } };
   // The research board's verdicts (index.ts writes them every 5 minutes): retired strategies stop
-  // betting, testing ones bet one contract.
+  // betting, testing ones bet TEST_SHARE of their account (3%, fairvalue.ts).
   private lab: { strategies?: Record<string, { status?: Status }> } | null = null;
   private labAt = 0;
   private feedGap: number | null = null;  // how far apart Coinbase and Gemini read right now (both lined up)
@@ -1254,8 +1273,8 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     const liveId = this.liveOn() && now >= this.livePausedUntil && now >= (this.liveSkip.get(w.slug) || 0) ? this.liveStrategy() : null;
     for (const st of CRYPTO_STRATEGIES) {
       const key = `${st.id}|${w.slug}`;
-      if (tau < st.tauMin || tau > (st.tauMax ?? len - 30)) { this.seen.delete(key); continue; }
-      // The research board: a retired strategy no longer bets; a testing one bets one contract.
+      if (tau < st.tauMin || tau > (st.tauMax ?? len - 30) || (st.series && !st.series.includes(w.series))) { this.seen.delete(key); continue; }
+      // The research board: a retired strategy no longer bets; a testing one bets 3% of its account.
       const status = statusOf(this.lab, st.id);
       if (status === 'retired') { this.seen.delete(key); continue; }
       // Is there room for a paper entry, a live entry, or both?
@@ -1287,6 +1306,10 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       const best = cands.filter((c) => c.ask >= st.priceMin && c.ask <= st.priceMax && c.edge >= st.minEdge && c.edge <= MAX_EDGE)
         .sort((a, b) => b.edge - a.edge)[0];
       if (!best) { this.seen.delete(key); continue; }
+      if (st.calm != null) {
+        const mv = this.moves(w.slug, now, 30);
+        if (!mv || Math.abs(mv.dMid) > st.calm) { this.seen.delete(key); continue; }
+      }
       // The data check: math way over the market's mid means our price is off, not a gift.
       const midSide = mid == null ? null : best.side === 'long' ? mid : 1 - mid;
       if (midSide != null && best.fair - midSide > MAX_GAP) { this.seen.delete(key); this.gapSkip(w, best, midSide, f, tau, now); continue; }
@@ -1294,7 +1317,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       // price after the fee. With the market the sharper one, this is what stops it paying fees for nothing.
       // The late favorite skips it: its bet is the market's own lean late in a window, not the math, and
       // its price band is the whole rule (each arm's ceiling leaves at least a cent a win after the fee).
-      // A paper test bet (1 contract) is judged on judgingBlend: with 4+ minutes left that's the 50/50
+      // A paper test bet is judged on judgingBlend: with 4+ minutes left that's the 50/50
       // start until the board decides. Real money always has to clear the fitted blend.
       const cost = best.ask + feePer(best.ask);
       const fitOk = !!st.fav || this.sizingProb(best, mid, tau) - cost >= BLEND_EDGE;
@@ -1316,11 +1339,13 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
             fair: st.fav ? best.ask : this.sizingProb(best, mid, tau), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
             fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(), recordKelly: this.records.get(st.id)?.f ?? 0,
           });
-          let qty = Math.floor(stake / best.ask);
-          if (status === 'testing') qty = Math.min(qty, 1);
-          // A probe: the blend clears the fee but the stake rounds to under one contract. On paper it
-          // still buys one, so the strategy keeps learning. It stays inside the ladder: room under the
-          // one-bet and all-open limits, and none at the floor.
+          // A test bet is TEST_SHARE of the account (fairvalue.ts); a promising or proven strategy bets
+          // its own size, never less than a test bet. Both stay inside the ladder and the book.
+          const test = Math.floor(testStake({ equity: bank.equity, peak: bank.peak, available: bank.available, openNet: bank.openNet, ceiling: this.ceiling(), depth: best.depth, price: best.ask }) / best.ask);
+          let qty = status === 'testing' ? test : Math.max(test, Math.floor(stake / best.ask));
+          // A probe: the stake rounds to under one contract. On paper it still buys one, so the strategy
+          // keeps learning. It stays inside the ladder: room under the one-bet and all-open limits, and
+          // none at the floor.
           const lim = riskLimits(Math.max(bank.peak, bank.equity));
           const room = Math.min(bank.available, bank.equity * lim.bet, Math.max(0, bank.equity * lim.open - bank.openNet));
           const probe = qty < 1 && best.ask <= room && drawdownScale(bank.equity, Math.max(bank.peak, bank.equity), lim.dd) > 0 && (best.depth == null || best.depth >= 1);
@@ -1683,7 +1708,8 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
           const stake = stakeFor({ fair: best.fair, price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet, ceiling: this.ceiling() });
           const lstatus = statusOf(this.lab, LADDER);
           if (lstatus === 'retired') continue;
-          const qty = lstatus === 'testing' ? Math.min(1, Math.floor(stake / best.ask)) : Math.floor(stake / best.ask);
+          const test = Math.floor(testStake({ equity: bank.equity, peak: bank.peak, available: bank.available, openNet: bank.openNet, ceiling: this.ceiling() }) / best.ask);
+          const qty = lstatus === 'testing' ? test : Math.max(test, Math.floor(stake / best.ask));
           if (qty < 1) continue;
           const pos = await openPosition(db, {
             strategy: LADDER, slug: m.slug, title: `BTC at ${when}`, side: best.side,

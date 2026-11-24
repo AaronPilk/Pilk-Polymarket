@@ -159,7 +159,7 @@ async function state(env: Env) {
 // The Sports bot's math vs the market on finished games (sportsgrade.ts), saved for the app.
 // The research board (research.ts): every strategy judged on its bets under the current rules, as a
 // return per dollar with hours (bitcoin) or games (sports) as the unit. The bots read the verdicts:
-// retired strategies stop betting, testing ones bet one contract, promising and proven bet normally.
+// retired strategies stop betting, testing ones bet 3% of their account, promising and proven bet normally.
 async function researchBoards(env: Env) {
   for (const book of ['btc', 'sports'] as const) {
     const { results } = await env.DB.prepare(AT_SIZE_SQL)

@@ -3,8 +3,8 @@
 //   retired    losing beyond luck (even its best case is a loss), still nothing to show after three
 //              times the bets it needs to be judged and at least 10 of its rarer result, or an idea
 //              the evidence already contradicts. It stops betting.
-//   testing    not enough bets to judge, or no clear answer yet. One contract a bet, so a test costs
-//              pennies while it gathers data.
+//   testing    not enough bets to judge, or no clear answer yet. Bets 3% of its paper account
+//              (TEST_SHARE in fairvalue.ts; one contract until Nov 24) while it gathers data.
 //   promising  ahead even in its worst case (mean minus 1.64 standard errors above zero, on the record
 //              with one more full loss counted), the mirror of the retire rule. Bets its normal size. The board looks every 5 minutes, and a bar as low
 //              as one standard error is one a strategy with no edge clears by luck often enough to bet
@@ -122,7 +122,7 @@ export function judge(id: string, rows: ReadyRow[], book: Book): Verdict {
   const lab = LAB[book], unit = book === 'btc' ? 'hours' : 'games';
   if (s.n < lab.judge || s.groups < lab.groups || s.mean == null || s.se == null || !(s.se > 0)) {
     const more = s.n < lab.judge ? `${s.n} of ${lab.judge} bets on the new rules` : s.groups < lab.groups ? `${s.groups} of ${lab.groups} ${unit} so far` : 'no spread in its results yet';
-    return { ...base, status: 'testing', reason: `Testing with one contract a bet: ${more}.` };
+    return { ...base, status: 'testing', reason: `Testing at 3% of its account a bet: ${more}.` };
   }
   const t = s.mean / s.se, line = `${pct(s.mean)} a dollar over ${s.n} bets`;
   if (s.mean + Z * s.se < 0) {
@@ -139,7 +139,7 @@ export function judge(id: string, rows: ReadyRow[], book: Book): Verdict {
   const lose = losses <= wins;
   const few = lose ? (rare === 1 ? 'loss' : 'losses') : (rare === 1 ? 'win' : 'wins');
   const wait = stale ? ` Only ${rare} ${few} so far: a bet that rarely ${lose ? 'loses' : 'wins'} needs ${RARE} before the board can call it.` : '';
-  return { ...base, status: 'testing', reason: `No clear answer yet: ${line} (t ${t.toFixed(1)}).${wait} Still one contract a bet.` };
+  return { ...base, status: 'testing', reason: `No clear answer yet: ${line} (t ${t.toFixed(1)}).${wait} Still testing at 3% a bet.` };
 }
 
 export function board(rowsBy: Map<string, ReadyRow[]>, ids: string[], book: Book, now = Date.now(), quickBy?: Map<string, Quick>) {

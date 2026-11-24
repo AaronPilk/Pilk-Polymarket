@@ -510,6 +510,10 @@ const STRATEGY_LABEL = {
   crypto_fav_late: 'Bitcoin · late favorite, 90–120 s left',
   crypto_fav_last: 'Bitcoin · late favorite, 30–90 s left',
   crypto_fav_98: 'Bitcoin · 98–99¢ favorite, 3 min left',
+  crypto_fav_99_1m: 'Bitcoin · 98–99¢ favorite, 1 min left',
+  crypto_fav_98_1h: 'Bitcoin · 98–99¢ favorite, hourly, 4–14 min left',
+  crypto_fav_98_calm: 'Bitcoin · 98–99¢ favorite, 3 min left, steady price',
+  crypto_fav_96_15m: 'Bitcoin · 95–98¢ favorite, 15-min, 5–9 min left',
   hoops_trailer_v1: 'Basketball · your style',
   hoops_trailer_h1: 'Basketball · your style, first half',
   hoops_trailer_deep: 'Basketball · your style, deeper dips',
@@ -903,9 +907,9 @@ function standCard(b) {
     <div class="row"><div class="row-main"><div class="row-title">${head}</div></div></div>
     ${line('proven', proven, 'Ahead beyond luck: these bet full size on paper and are the ones that could get real money. That switch is yours.', true)}
     ${line('promising', promising, 'Ahead even in the worst case, so they bet normal size on paper. Not proven yet.', true)}
-    ${line('testing', testing, 'One contract a bet until there are enough bets to tell skill from luck.', true)}
+    ${line('testing', testing, '3% of its paper account a bet until there are enough bets to tell skill from luck.', true)}
     ${line('retired', retired, 'Stopped: they lost money or showed no edge after fees, and don’t bet anymore.', false)}
-    <div class="row-sub wrap pad">How to read this page: <b>Run</b> counts only bets on the current test rules. <b>All</b> also includes Nov 22, when the bot bet bigger before the fixes, so it looks much worse. Test bets are one contract, so the dollar amounts are small and swing on luck. The labels are the real signal: watch for Promising or Proven.${book === 'btc' ? ' The sell-early card grades exits only: green there means selling early beat holding on those bets, not that the bets made money.' : ''}</div>
+    <div class="row-sub wrap pad">How to read this page: <b>Run</b> counts only bets on the current test rules. <b>All</b> also includes Nov 22, when the bot bet bigger before the fixes, so it looks much worse. Test bets are 3% of each strategy's $100 paper account (one contract before Nov 24), so the dollar amounts swing on luck. The labels are the real signal: watch for Promising or Proven.${book === 'btc' ? ' The sell-early card grades exits only: green there means selling early beat holding on those bets, not that the bets made money.' : ''}</div>
   </div>`;
 }
 
@@ -1134,7 +1138,7 @@ function botRest(b) {
         <div class="step"><div><b>Its own ${money(b.allocation, { cents: false })}</b>It trades its bankroll plus what it wins. Your money and your bets are off limits, and it skips any window where you hold a position or have orders.</div></div>
         <div class="step"><div><b>Your switch</b>Real orders only while LIVE_TRADING is on in Cloudflare, and only the Bitcoin bot has a real-money engine so far. Turn it off and it stops placing orders right away; open positions ride to their result.</div></div>
         <div class="step"><div><b>Never pays more than it saw</b>Every buy is a limit order at the price it saw, cancelled if it doesn't fill on the spot. It checks its first order with Polymarket's preview before placing anything real.</div></div>
-        <div class="step"><div><b>Bets grow with the account, inside the ladder</b>Sized off what the account is worth now, the blend of math and market the grading has fitted, and the strategy's own record once it has shown an edge beyond luck. When the math flags a trade nothing backs, paper strategies still buy one contract so they keep learning; real money never does. Small accounts can bet up to 10% at a time; by $100K it's 1.5%. Below its high, bets shrink in step toward a floor, so a bad run can't dig a deep hole. Never more than the market can fill. Your own cap per bet (BOT_MAX_BET) beats all of it.</div></div>
+        <div class="step"><div><b>Bets grow with the account, inside the ladder</b>Sized off what the account is worth now, the blend of math and market the grading has fitted, and the strategy's own record once it has shown an edge beyond luck. Paper strategies still being tested bet 3% of their account; when a stake rounds to nothing they still buy one contract so they keep learning. Real money never does. Small accounts can bet up to 10% at a time; by $100K it's 1.5%. Below its high, bets shrink in step toward a floor, so a bad run can't dig a deep hole. Never more than the market can fill. Your own cap per bet (BOT_MAX_BET) beats all of it.</div></div>
         <div class="step"><div><b>Checks its data first</b>It only trades on prices fresh off live streams, bitcoin and Polymarket both, lined up with the official index. If its math and the market are more than 15 points apart it skips the trade, and after a losing exit it stays out of that window. It sits out while Coinbase and Gemini disagree, for 20 seconds after a sudden jump, and around jobs, CPI and Fed releases.</div></div>
       </div>
     </div>`;

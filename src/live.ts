@@ -20,7 +20,7 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import { ESPN_PATHS, fetchScoreboard, gameLine, gameState, longSide, matchEvent } from './espn';
-import { LEAGUE, dailyStopHit, drawdownScale, edgeFloor, isBlowout, otherSideCheap, riskLimits, shareLeft, sportFair, stakeFor } from './fairvalue';
+import { LEAGUE, dailyStopHit, drawdownScale, edgeFloor, isBlowout, otherSideCheap, riskLimits, shareLeft, sportFair, stakeFor, testStake } from './fairvalue';
 import { addToPosition, bankroll, closePosition, loadOpen, openPosition, settlePosition, type Position } from './paper';
 import { SPORTS_POINTS, SPORTS_POINT_TOL } from './sportsgrade';
 import { RULES, statusOf, type Status } from './research';
@@ -88,18 +88,19 @@ interface HoopsStrategy {
   leagues?: string[];             // only these leagues
   hold?: boolean;                 // no model sell: held to the final
 }
-// Each runs its own paper account and can hold its own position in any game.
+// Each runs its own paper account and can hold its own position in any game, up to 10 games at once
+// (Nov 24: Aaron wants the testing maxed out; at 3% a bet the ladder's 30% open limit caps it about there).
 const HOOPS_STRATEGIES: HoopsStrategy[] = [
-  { id: 'hoops_trailer_v1', maxOpen: 2, trailing: true, maxProgress: 0.75, minDiscount: 0.05, veto: (p) => (p < 0.5 ? 0.02 : 0.03), priceMin: 0.2, priceMax: 0.65 },
-  { id: 'hoops_trailer_h1', maxOpen: 2, trailing: true, maxProgress: 0.5, minDiscount: 0.05, veto: () => 0.02, priceMin: 0.2, priceMax: 0.65 },
-  { id: 'hoops_trailer_deep', maxOpen: 2, trailing: true, maxProgress: 0.75, minDiscount: 0.1, veto: () => 0.04, priceMin: 0.15, priceMax: 0.6 },
-  { id: 'hoops_value_v1', maxOpen: 1, trailing: false, maxProgress: 0.75, minDiscount: 0, veto: (p) => (p > 0.5 ? 0.06 : 0.04), leaderEdge: 0.08, priceMin: 0.15, priceMax: 0.85 },
+  { id: 'hoops_trailer_v1', maxOpen: 10, trailing: true, maxProgress: 0.75, minDiscount: 0.05, veto: (p) => (p < 0.5 ? 0.02 : 0.03), priceMin: 0.2, priceMax: 0.65 },
+  { id: 'hoops_trailer_h1', maxOpen: 10, trailing: true, maxProgress: 0.5, minDiscount: 0.05, veto: () => 0.02, priceMin: 0.2, priceMax: 0.65 },
+  { id: 'hoops_trailer_deep', maxOpen: 10, trailing: true, maxProgress: 0.75, minDiscount: 0.1, veto: () => 0.04, priceMin: 0.15, priceMax: 0.6 },
+  { id: 'hoops_value_v1', maxOpen: 10, trailing: false, maxProgress: 0.75, minDiscount: 0, veto: (p) => (p > 0.5 ? 0.06 : 0.04), leaderEdge: 0.08, priceMin: 0.15, priceMax: 0.85 },
   // Aaron's comeback play, with the limits his own record points to: the team favored at tip-off,
   // behind and 8¢+ under its tip-off price in the first three quarters; at most one add, only in
   // the first half and never under 10¢ (his adds under 10¢: 0 of 8 historically, 4 more lost on
   // Nov 22); cash out into the comeback (half the drop won back, at least 8¢ over the entry); and
   // once out, done with that game (his Nov 22 Pistons re-buy after cashing out lost $38.86).
-  { id: 'hoops_comeback_v1', maxOpen: 2, trailing: true, favoriteOnly: true, maxProgress: 0.75, minDiscount: 0.08, veto: () => 0.02, priceMin: 0.15, priceMax: 0.7,
+  { id: 'hoops_comeback_v1', maxOpen: 10, trailing: true, favoriteOnly: true, maxProgress: 0.75, minDiscount: 0.08, veto: () => 0.02, priceMin: 0.15, priceMax: 0.7,
     comeback: 0.5, comebackMin: 0.08, maxAdds: 1, addBefore: 0.5, oneShot: true },
   // Aaron's late swing: 3-12 minutes left, a team down 3-9 at 8-25¢, bought for the next run rather
   // than the result and cashed out at 2x with a resting sell; no adds, one position per game, a fixed
@@ -109,21 +110,21 @@ const HOOPS_STRATEGIES: HoopsStrategy[] = [
   // touched it 20 times against 11.6. So three versions: his raw play (the math only blocks prices it
   // rates 8¢+ rich, which is more likely bad data), the same with his "protect the account" cut at
   // half the entry, and one where the math must rate the price 3¢ cheap after fees.
-  { id: 'hoops_swing_v1', maxOpen: 2, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => -0.08, priceMin: 0.08, priceMax: 0.25,
+  { id: 'hoops_swing_v1', maxOpen: 10, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => -0.08, priceMin: 0.08, priceMax: 0.25,
     lateWindow: [3, 12], deficit: [3, 9], fixedShare: 0.02, target2x: true, maxAdds: 0, oneShot: true },
-  { id: 'hoops_swing_stop', maxOpen: 2, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => -0.08, priceMin: 0.08, priceMax: 0.25,
+  { id: 'hoops_swing_stop', maxOpen: 10, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => -0.08, priceMin: 0.08, priceMax: 0.25,
     lateWindow: [3, 12], deficit: [3, 9], fixedShare: 0.02, target2x: true, stopHalf: true, maxAdds: 0, oneShot: true },
-  { id: 'hoops_swing_model', maxOpen: 2, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => 0.03, priceMin: 0.08, priceMax: 0.25,
+  { id: 'hoops_swing_model', maxOpen: 10, trailing: true, maxProgress: 1, minDiscount: 0, veto: () => 0.03, priceMin: 0.08, priceMax: 0.25,
     lateWindow: [3, 12], deficit: [3, 9], fixedShare: 0.02, target2x: true, maxAdds: 0, oneShot: true },
   // The leader at the half (NBA), the other side of Aaron's halftime scalp. On 4,079 replayed games
   // (scripts/q3_scalp_replay.py, Nov 23) a team behind at the half and down to 10¢ or less won less
   // often than its price said, and backing the team ahead made about +2¢ a contract in the NBA (240
   // games, 7 losses, t 2.1, both halves of the season up); college was flat. A lead, not an edge, so
-  // one contract while the board tests it. From halftime through the first 4 minutes of the third
+  // test-size bets while the board tests it. From halftime through the first 4 minutes of the third
   // quarter (24 to 20 minutes left), the other side asking 10¢ or less on a book no wider than 6¢. No
   // math veto (it bets the market's own lean, like the 98¢ bitcoin favorite), no adds, held to the
   // final, one per game.
-  { id: 'hoops_leader_half', maxOpen: 4, trailing: false, leading: true, otherAskMax: 0.1, leagues: ['nba'], maxProgress: 0.6, minDiscount: 0,
+  { id: 'hoops_leader_half', maxOpen: 10, trailing: false, leading: true, otherAskMax: 0.1, leagues: ['nba'], maxProgress: 0.6, minDiscount: 0,
     veto: () => -1, priceMin: 0.85, priceMax: 0.985, lateWindow: [20, 24], fixedShare: 0.02, maxAdds: 0, oneShot: true, hold: true },
 ];
 export const HOOPS_IDS = HOOPS_STRATEGIES.map((s) => s.id);
@@ -214,7 +215,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
   private longHome = new Map<string, boolean>();             // slug → long team is the home team
   private open: Position[] = [];                             // open basketball paper positions
   // The research board's verdicts (index.ts writes them every 5 minutes): retired strategies stop
-  // opening positions, testing ones bet one contract.
+  // opening positions, testing ones bet 3% of their account (TEST_SHARE).
   private lab: { strategies?: Record<string, { status?: Status }> } | null = null;
   private labAt = 0;
   private openAt = 0;
@@ -611,7 +612,8 @@ export class LiveFeed extends DurableObject<LiveEnv> {
             // One game is one bet: starter plus adds stay inside the ladder's share of the account.
             const room = bank.equity * riskLimits(bank.peak).bet - held.cost;
             const stake = Math.min(stakeFor({ fair: v.fair, price: v.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet, ceiling: ceiling(this.env) }), room);
-            const qty = status === 'testing' ? Math.min(1, Math.floor(stake / v.ask)) : Math.floor(stake / v.ask);
+            const test = Math.floor(Math.min(testStake({ equity: bank.equity, peak: bank.peak, available: bank.available, openNet: bank.openNet, ceiling: ceiling(this.env) }), room) / v.ask);
+            const qty = status === 'testing' ? test : Math.max(test, Math.floor(stake / v.ask));
             if (status !== 'retired' && qty >= 1 && !dailyStopHit(bank.equity, bank.today, bank.peak)) {
               await addToPosition(db, held, { ask: v.ask, qty, coef: COEF, reason: `fair ${cents(v.fair)} vs ask ${cents(v.ask)}, ${where(v.lead)}`, now });
             }
@@ -646,8 +648,10 @@ export class LiveFeed extends DurableObject<LiveEnv> {
         } else {
           stake = stakeFor({ fair: pick.fair, price: pick.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet, ceiling: ceiling(this.env) });
         }
-        // Testing: one contract a bet until the board has enough to judge.
-        const qty = status === 'testing' ? Math.min(1, Math.floor(stake / pick.ask)) : Math.floor(stake / pick.ask);
+        // Testing: 3% of the account a bet (TEST_SHARE) until the board has enough to judge; promising and
+        // proven strategies bet their own size, never less than that.
+        const test = Math.floor(testStake({ equity: bank.equity, peak: bank.peak, available: bank.available, openNet: bank.openNet, ceiling: ceiling(this.env) }) / pick.ask);
+        const qty = status === 'testing' ? test : Math.max(test, Math.floor(stake / pick.ask));
         if (qty < 1) continue;
         const why = st.trailing
           ? `behind and ${cents(pick.start - pick.ask)} under tip-off; fair ${cents(pick.fair)} vs ask ${cents(pick.ask)}, ${where(pick.lead)}`

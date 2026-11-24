@@ -168,3 +168,19 @@ test('otherSideCheap: the leader at the half only buys while the other side is d
   assert.equal(otherSideCheap(0.97, 0.9, 0.1), false);     // 7¢ wide: the replay dropped these
   assert.equal(otherSideCheap(0.96, 0.9, 0.1), true);      // 6¢ wide is allowed
 });
+
+test('a test bet is 3% of the account, inside the ladder', async () => {
+  const { testStake, TEST_SHARE } = await import('../src/fairvalue.ts');
+  assert.equal(TEST_SHARE, 0.03);
+  const near = (a: number, b: number) => assert.ok(Math.abs(a - b) < 1e-9, `${a} vs ${b}`);
+  near(testStake({ equity: 100, peak: 100, available: 100, openNet: 0 }), 3);
+  // half way down to the floor (the $100 rung gives back 50%), half size
+  near(testStake({ equity: 75, peak: 100, available: 75, openNet: 0 }), 1.125);
+  // the 30% all-open limit leaves $1 of room
+  near(testStake({ equity: 100, peak: 100, available: 71, openNet: 29 }), 1);
+  // never more than the book offers, or Aaron's cap
+  near(testStake({ equity: 100, peak: 100, available: 100, openNet: 0, depth: 2, price: 0.5 }), 1);
+  near(testStake({ equity: 100, peak: 100, available: 100, openNet: 0, ceiling: 2 }), 2);
+  // at the floor, nothing
+  near(testStake({ equity: 50, peak: 100, available: 50, openNet: 0 }), 0);
+});
