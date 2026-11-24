@@ -209,4 +209,8 @@ test("Aaron's price tiers: most around 10¢, less at 5¢ and 20¢+, never past t
   assert.ok(92 * 0.10 + 92 * 0.095 * 0.10 * 0.90 <= 10);
   assert.equal(tierQty(0, 0.10), 0);
   assert.ok(TIERED.has('hoops_tier_2x') && TIERED.has('hoops_tier_3x') && TIERED.has('hoops_tier_reload'));
+  // the 3x account gets no resting 2x sell (tpBelow 0), the 2x accounts get one on every entry (tpBelow 1)
+  assert.equal(takeProfitFor(0.04, 0), null);
+  assert.equal(takeProfitFor(0.12, 1), 0.24);
+  assert.equal(takeProfitFor(0.12), 0.24);   // the old default: every entry under 15¢
 });

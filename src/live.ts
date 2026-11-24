@@ -703,7 +703,10 @@ export class LiveFeed extends DurableObject<LiveEnv> {
             : `fair ${cents(pick.fair)} vs ask ${cents(pick.ask)}, ${where(pick.lead)}`;
         const pos = await openPosition(db, {
           strategy: st.id, slug: m.slug, title: `${m.long_team || 'Home'} vs. ${m.short_team || 'Away'}`, side: pick.side,
-          sideName: pick.team, ask: pick.ask, qty, coef: COEF, reason: why, now, tpBelow: st.target2x || st.targetMult === 2 ? 1 : undefined,
+          // tpBelow: the resting 2x sell. Left undefined, paper.ts puts one on every entry under 15¢, so a 3x account
+          // says 0 (none: its own 3x rule above sells it) and a 2x one says 1 (every entry).
+          sideName: pick.team, ask: pick.ask, qty, coef: COEF, reason: why, now,
+          tpBelow: st.target2x || st.targetMult === 2 ? 1 : st.targetMult ? 0 : undefined,
           meta: st.tiers ? { rules: RULES, status, tier: Math.round(qty * pick.ask * 100) / 100 } : { rules: RULES, status },
         });
         this.open.push(pos);
