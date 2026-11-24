@@ -383,6 +383,17 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     const lap = (k: string) => { const t = Date.now(); step[k] = t - last; last = t; };
     try {
       await this.boot(now); lap('boot');
+      // The research board's statuses come first: until they're read, a strategy the board retired
+      // looks like a fresh test, and right after a restart the ladder scan or the first stream prices
+      // could bet on it (the ladder did, once, at the Nov 23 10:15 PM restart).
+      if (!this.lab || now - this.labAt >= 5 * MIN) {
+        this.labAt = now;
+        try {
+          const lb = await this.env.DB.prepare("SELECT v FROM brain WHERE k = 'lab_btc'").first<{ v: string }>();
+          if (lb) this.lab = JSON.parse(lb.v);
+        } catch (e) { console.log('lab error', String((e as any)?.message || e)); }
+        lap('lab');
+      }
       await this.ensureStreams(now); lap('streams');
       step.pmc = this.pmConnects; step.cbc = this.cbConnects; step.gmc = this.gmConnects; step.bkc = this.bookConnects;
       const stmts: D1PreparedStatement[] = [];
@@ -405,14 +416,6 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         this.tunedAt = now;
         try { await this.tune(now); } catch (e) { console.log('tune error', String((e as any)?.message || e)); }
         lap('tune');
-      }
-      if (now - this.labAt >= 5 * MIN) {
-        this.labAt = now;
-        try {
-          const lb = await this.env.DB.prepare("SELECT v FROM brain WHERE k = 'lab_btc'").first<{ v: string }>();
-          if (lb) this.lab = JSON.parse(lb.v);
-        } catch (e) { console.log('lab error', String((e as any)?.message || e)); }
-        lap('lab');
       }
       stmts.push(...this.pendingStmts.splice(0));
       step.stmts = stmts.length;
