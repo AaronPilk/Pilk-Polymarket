@@ -89,6 +89,8 @@ export class CricketFeed extends DurableObject<CricketEnv> {
   private openAt = 0;
   private lab: { strategies?: Record<string, { status?: Status }> } | null = null;
   private labAt = 0;
+  private statusAt = 0;
+  private espnStatus = '';   // last ESPN fetch result, for the status row
 
   async fetch(_req: Request): Promise<Response> {
     if (this.env.CRICKET === 'off') { await this.ctx.storage.deleteAlarm(); return Response.json({ ok: true, cricket: 'off' }); }
@@ -113,6 +115,14 @@ export class CricketFeed extends DurableObject<CricketEnv> {
         this.record(games, now, stmts);
         try { await this.paper(games, now); } catch (e) { console.log('cricket paper error', String((e as any)?.message || e)); }
         for (let i = 0; i < stmts.length; i += 100) await this.env.DB.batch(stmts.slice(i, i + 100));
+      }
+      // Once a minute: what the feed sees, for the reviews and the dashboard (brain 'cricket_status').
+      if (now - this.statusAt >= MIN) {
+        this.statusAt = now;
+        const st = { markets: this.markets.length, live: live, linked: games.filter((m) => m.espn_id).length, espn: this.espnStatus,
+          events: this.events.length, inPlay: [...this.states.values()].filter((x) => x.state === 'in').length, open: this.open.length };
+        await this.env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
+          .bind('cricket_status', JSON.stringify(st), now).run().catch(() => undefined);
       }
     } catch (e) {
       console.log('cricket feed error', String((e as any)?.message || e));
@@ -164,12 +174,13 @@ export class CricketFeed extends DurableObject<CricketEnv> {
     for (const host of ESPN) {
       try {
         const res = await fetch(`https://${host}/apis/site/v2/sports/cricket/scorepanel?_=${Math.floor(now / 2000)}`, { headers: UA });
+        this.espnStatus = `${host} ${res.status}`;
         if (!res.ok) continue;
         const body: any = await res.json();
         this.events = (body.scores || []).flatMap((s: any) => (s.events || []).map((e: any) => ({ ...e, _league: s.leagues?.[0]?.name || '' })));
         this.scoreAt = now;
         break;
-      } catch {}
+      } catch (e) { this.espnStatus = `${host} error ${String((e as any)?.message || e).slice(0, 80)}`; }
     }
     const save: D1PreparedStatement[] = [];
     for (const m of games) {
