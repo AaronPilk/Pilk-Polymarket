@@ -175,6 +175,7 @@ interface CryptoStrategy {
   fav?: boolean;              // the late favorite: no math or blend check, and it sizes only on its own record
   series?: string[];          // only these window lengths (default: all)
   calm?: number;              // only while the window's mid has moved this much or less over the last 30 s
+  bank?: number;              // paper only: this account starts with this much instead of BOT_ALLOCATION
 }
 const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_fair_v1', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15, exitAbove: 0.03, tauMin: 75 },
@@ -208,6 +209,12 @@ const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_fav_98_calm', minEdge: -1, priceMin: 0.98, priceMax: 0.99, tpBelow: 0, exitAbove: null, tauMin: 150, tauMax: 210, fav: true, calm: 0.01 },
   { id: 'crypto_fav_96_15m', minEdge: -1, priceMin: 0.95, priceMax: 0.98, tpBelow: 0, exitAbove: null, tauMin: 300, tauMax: 540, fav: true, series: ['15m'] },
 ];
+// Nov 24, Aaron: the three favorites that hadn't lost yet, run again as if the account started at $1,000. Same
+// rules, their own paper accounts (the _1k ids), sized off a $1,000 bankroll that grows or shrinks with its own
+// results, on the ladder's $1,000 rung. Paper only: real money only ever trades LIVE_STRATEGY on BOT_ALLOCATION.
+for (const id of ['crypto_fav_99_1m', 'crypto_fav_98_calm', 'crypto_fav_98_1h']) {
+  CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === id)!, id: `${id}_1k`, bank: 1000 });
+}
 const BY_ID = new Map(CRYPTO_STRATEGIES.map((s) => [s.id, s]));
 export const CRYPTO_IDS = [...CRYPTO_STRATEGIES.map((s) => s.id), 'crypto_ladder_v1'];
 
@@ -1598,7 +1605,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     if (c && now - c.at < 15_000) return c.bank;
     const bank = strategy === 'live'
       ? await bankroll(this.env.DB, this.allocation(), now, undefined, 'live')
-      : await bankroll(this.env.DB, this.allocation(), now, strategy);
+      : await bankroll(this.env.DB, BY_ID.get(strategy)?.bank ?? this.allocation(), now, strategy);
     this.bankCache.set(strategy, { at: now, bank });
     return bank;
   }

@@ -91,6 +91,7 @@ interface HoopsStrategy {
   tiers?: Tier[];                 // Aaron's price tiers: always this size (fairvalue.ts tierStake), never the 3% test size
   targetMult?: number;            // a resting sell at this multiple of the entry (no fee); no model sell
   reload?: number;                // buy back into the same game after winning cash-outs only, up to this many positions a game
+  bank?: number;                  // paper only: this account starts with this much instead of BOT_ALLOCATION
 }
 // Each runs its own paper account and can hold its own position in any game, up to 10 games at once
 // (Nov 24: Aaron wants the testing maxed out; at 3% a bet the ladder's 30% open limit caps it about there).
@@ -157,6 +158,8 @@ const HOOPS_STRATEGIES: HoopsStrategy[] = [
   { id: 'hoops_lead_late', maxOpen: 10, trailing: false, leading: true, minLead: 15, leagues: ['cbb'], maxProgress: 1, minDiscount: 0,
     veto: () => -1, priceMin: 0.7, priceMax: 0.97, lateWindow: [3, 10], maxAdds: 0, oneShot: true, hold: true },
 ];
+// Nov 24, Aaron: model value run again as if the account started at $1,000 (its own paper account, sized off it).
+HOOPS_STRATEGIES.push({ ...HOOPS_STRATEGIES.find((s) => s.id === 'hoops_value_v1')!, id: 'hoops_value_1k', bank: 1000 });
 export const HOOPS_IDS = HOOPS_STRATEGIES.map((s) => s.id);
 const MAX_EDGE = 0.12;          // a bigger "edge" is more likely our data being stale than a gift
 // Our scoreboard can lag the market, worst around the buzzer, when ESPN posts the last baskets
@@ -639,7 +642,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
           const blocked = !fresh || !calm || !settled || buzzer || minsLeft <= 3 || held.adds >= (st.maxAdds ?? 2) || prog >= (st.addBefore ?? 1) || isBlowout(m.league, v.lead, g.period, g.clock)
             || (prog >= 0.75 && v.lead < -9) || (st.trailing && v.lead >= 0) || v.edge > MAX_EDGE;
           if (!blocked && v.ask >= 0.1 && v.ask <= held.avg_entry - 0.05 && v.edge >= 0.06) {
-            const bank = await bankroll(db, allocation, now, st.id);
+            const bank = await bankroll(db, st.bank ?? allocation, now, st.id);
             // One game is one bet: starter plus adds stay inside the ladder's share of the account.
             const room = bank.equity * riskLimits(bank.peak).bet - held.cost;
             const stake = Math.min(stakeFor({ fair: v.fair, price: v.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet, ceiling: ceiling(this.env) }), room);
@@ -676,7 +679,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
             .bind(st.id, m.slug).first<{ n: number; bad: number | null }>();
           if (prior && (prior.n >= st.reload || (prior.bad ?? 0) > 0)) continue;
         }
-        const bank = await bankroll(db, allocation, now, st.id);
+        const bank = await bankroll(db, st.bank ?? allocation, now, st.id);
         if (dailyStopHit(bank.equity, bank.today, bank.peak)) continue;
         let stake: number;
         if (st.fixedShare) {

@@ -532,10 +532,18 @@ const STRATEGY_LABEL = {
   hoops_tier_reload: 'Basketball · your price tiers, 2× and buy back in',
   hoops_leader_half: 'Basketball · the leader at the half (NBA)',
   hoops_lead_late: 'Basketball · up 15+ late (college)',
+  // $1,000 accounts: the same rules as if the account started at $1,000, shown apart from the $100 lineup.
+  crypto_fav_99_1m_1k: 'Bitcoin · 98–99¢ favorite, 1 min left ($1,000)',
+  crypto_fav_98_calm_1k: 'Bitcoin · 98–99¢ favorite, 3 min left, steady price ($1,000)',
+  crypto_fav_98_1h_1k: 'Bitcoin · 98–99¢ favorite, hourly, 4–14 min left ($1,000)',
+  hoops_value_1k: 'Basketball · model value ($1,000)',
 };
 const variantOf = (id) => (STRATEGY_LABEL[id] || id || '').split(' · ')[1] || '';
-const groupOf = (s) => (s?.startsWith('crypto_') ? 'btc' : s?.startsWith('hoops_') ? 'hoops' : 'other');
-const GROUP_LABEL = { live: 'Real money', btc: 'Paper · Bitcoin', hoops: 'Paper · Basketball' };
+const bookOf = (s) => (s?.startsWith('crypto_') ? 'btc' : s?.startsWith('hoops_') ? 'sports' : 'other');
+const is1k = (s) => !!s?.endsWith('_1k');
+const groupOf = (s) => (s?.startsWith('crypto_') ? (is1k(s) ? 'btc1k' : 'btc') : s?.startsWith('hoops_') ? (is1k(s) ? 'hoops1k' : 'hoops') : 'other');
+const GROUP_LABEL = { live: 'Real money', btc: 'Paper · Bitcoin', hoops: 'Paper · Basketball', btc1k: 'Paper · Bitcoin $1,000', hoops1k: 'Paper · Basketball $1,000' };
+const groupBank = (g, b) => (String(g).endsWith('1k') ? 1000 : b?.allocation || 100);
 const BOOK_LABEL = { btc: 'Bitcoin bot', sports: 'Sports bot' };
 const BOOK_GROUP = { btc: 'btc', sports: 'hoops' };
 const BOT_RANGE_LABEL = { run: 'This run, on the new rules', '1h': 'Last hour', '1d': 'Last 24 hours', '1w': 'Last 7 days', all: 'Since it started' };
@@ -552,7 +560,7 @@ async function loadCurve(range, mode) {
 }
 // Each bot shows only its own book: the Bitcoin bot's paper lineup (and real money once it trades),
 // or the Sports bot's paper lineup. They're never added together.
-const botGroups = (b) => (b?.book === 'sports' ? ['hoops'] : [...(b?.live ? ['live'] : []), 'btc']);
+const botGroups = (b) => (b?.book === 'sports' ? ['hoops', 'hoops1k'] : [...(b?.live ? ['live'] : []), 'btc', 'btc1k']);
 
 // /api/bot every 5 s while the tab is open; the chart data every 30 s, or right away when a trade
 // closes so the line steps the moment it happens.
@@ -607,7 +615,7 @@ function renderBot() {
     botBuilt = true;
     setupBotControls();
   }
-  if (store.botFocus && groupOf(store.botFocus) !== BOOK_GROUP[b.book || 'btc']) store.botFocus = null;
+  if (store.botFocus && bookOf(store.botFocus) !== (b.book || 'btc')) store.botFocus = null;
   paintBotChips();
   if (!botScrub) { paintBotHero(); drawBotChart(); }
   paintStratGrid();
@@ -757,7 +765,7 @@ function paintStratGrid() {
   if (!el || !b) return;
   const c = store.botCurve[curveKey('paper')]?.data;
   if (!c) { el.innerHTML = '<div class="card empty">Loading…</div>'; return; }
-  const group = BOOK_GROUP[b.book || 'btc'];
+  const group = store.botGroup === 'live' ? BOOK_GROUP[b.book || 'btc'] : store.botGroup;
   const lab = b.lab?.strategies || {};
   const cards = Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === group).map((id) => {
     const s = c.per?.[id] || { n: 0, w: 0, pnl: 0, staked: 0, pts: [] };
@@ -807,21 +815,22 @@ function paintBotHero() {
   const parts = [];
   if (live && b.live) parts.push(`<span>Account <b>${money(b.live.equity)}</b></span>`);
   // Paper: every strategy runs its own account, so the total is out of all of them together.
-  const nAcc = Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === BOOK_GROUP[b.book || 'btc']).length;
-  const paperCap = nAcc * (b.allocation || 100);
+  const nAcc = Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === store.botGroup).length;
+  const bankEach = groupBank(store.botGroup, b), paperCap = nAcc * bankEach;
+  const base = store.botGroup === BOOK_GROUP[b.book || 'btc'];
   if (focus) {
     const s = store.botCurve[curveKey('paper')]?.data?.per?.[focus];
     const st = b.lab?.strategies?.[focus];
     if (s?.staked > 0) parts.push(`<span><b class="${tone(s.pnl)}">${signedPct(s.pnl / s.staked)}</b> on ${money(s.staked)} bet</span>`);
     if (st) parts.push(`<span class="pill ${STATUS_PILL[st.status]?.[0] || ''}">${STATUS_PILL[st.status]?.[1] || esc(st.status)}</span>`);
   }
-  if (!live && !focus && paperCap > 0) parts.push(`<span><b class="${tone(v)}">${signedPct(v / paperCap)}</b> of ${money(paperCap, { cents: false })} paper (${nAcc} accounts × ${money(b.allocation, { cents: false })})</span>`);
+  if (!live && !focus && paperCap > 0) parts.push(`<span><b class="${tone(v)}">${signedPct(v / paperCap)}</b> of ${money(paperCap, { cents: false })} paper (${nAcc} account${nAcc === 1 ? '' : 's'} × ${money(bankEach, { cents: false })})</span>`);
   // Fees so far, as a share of the money bet, and what the same trades would cost through the API
   // (flat 0.0695 with 70% rebated, Nov 21 to Dec 31, 2026) against paper's full 0.095.
   const onRun = store.botRange === 'run' && b.run;
   const fees = onRun ? b.run.fees || 0 : b.fees, staked = onRun ? b.run.staked || 0 : b.staked;
-  if (!live && !focus && staked > 0 && fees > 0) parts.push(`<span>Fees <b>${money(fees)}</b> (${pct(fees / staked, 1)} of ${money(staked, { cents: false })} bet), about ${money(fees * API_FEE_SHARE)} through the API</span>`);
-  if (!live && !focus && onRun) {
+  if (!live && !focus && base && staked > 0 && fees > 0) parts.push(`<span>Fees <b>${money(fees)}</b> (${pct(fees / staked, 1)} of ${money(staked, { cents: false })} bet), about ${money(fees * API_FEE_SHARE)} through the API</span>`);
+  if (!live && !focus && base && onRun) {
     const allTime = (b.realized || 0) + (b.unrealized || 0);
     parts.push(`<span>All-time <b class="${tone(allTime)}">${money(allTime, { sign: true })}</b>, retired tests included</span>`);
   }
@@ -1016,7 +1025,7 @@ function quickLine(q) {
 // Where things stand, in plain words: the board's verdicts for this bot and how to read the page.
 function standCard(b) {
   const book = b.book || 'btc', group = BOOK_GROUP[book];
-  const rows = b.lab?.strategies ? Object.entries(b.lab.strategies).filter(([id]) => STRATEGY_LABEL[id] && groupOf(id) === group) : [];
+  const rows = b.lab?.strategies ? Object.entries(b.lab.strategies).filter(([id]) => STRATEGY_LABEL[id] && bookOf(id) === book) : [];
   const of = (k) => rows.filter(([, v]) => v.status === k).sort((x, y) => (y[1].n || 0) - (x[1].n || 0));
   const proven = of('proven'), promising = of('promising'), testing = of('testing'), retired = of('retired');
   const list = (xs, withN) => xs.map(([id, v]) => `${esc(variantOf(id))}${withN ? ` <span class="faint">(${v.n || 0} bet${v.n === 1 ? '' : 's'})</span>` : ''}`).join(' · ');
@@ -1165,9 +1174,9 @@ function botRest(b) {
   const L = b.live;
   const losses = (b.record?.closed || 0) - (b.record?.wins || 0);
   const book = b.book || 'btc', group = BOOK_GROUP[book];
-  const ids = Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === group);
+  const ids = Object.keys(STRATEGY_LABEL).filter((id) => bookOf(id) === book);
   const lineup = ids.map((id) => ({ strategy: id, closed: 0, wins: 0, open: 0, pnl: 0, staked: 0, ...((b.byStrategy || []).find((x) => x.strategy === id) || {}) }));
-  const leader = lineup.filter((x) => x.closed).sort((x, y) => y.pnl - x.pnl)[0];
+  const leader = lineup.filter((x) => x.closed && !is1k(x.strategy)).sort((x, y) => y.pnl - x.pnl)[0];
   const tiles = [
     { label: 'Open', value: String(b.positions.length), foot: `${money(b.atRisk)} at risk` },
     { label: 'Record', value: b.record?.closed ? `${b.record.wins}–${losses}` : '–', foot: 'all paper, all time' },
@@ -1229,7 +1238,8 @@ function botRest(b) {
     <div class="section">
       <div class="section-title">All-time by strategy<small>each its own ${money(b.allocation, { cents: false })}</small></div>
       <div class="stats" style="margin-bottom:6px">${tiles.map(statTile).join('')}</div>
-      ${stratGroup(group, book === 'btc' ? 'Bitcoin' : 'Basketball')}
+      ${stratGroup(group, `${book === 'btc' ? 'Bitcoin' : 'Basketball'} · $100 accounts`)}
+      ${stratGroup(`${group}1k`, `${book === 'btc' ? 'Bitcoin' : 'Basketball'} · $1,000 accounts`)}
       ${book === 'sports' && !b.sports ? '<div class="card pad off-note"><b>The Sports bot is asleep.</b> SPORTS is set to off in Cloudflare.</div>' : ''}
     </div>
 

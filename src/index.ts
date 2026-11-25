@@ -211,13 +211,16 @@ async function bot(env: Env, book: Book) {
   const q = async <T>(sql: string, ...args: unknown[]): Promise<T[]> =>
     (await env.DB.prepare(sql).bind(...args).all<T>().catch(() => ({ results: [] as T[] }))).results;
   const scope = ` AND strategy LIKE '${BOOKS[book]}'`;
+  // Book totals, the run and the head-to-head leave out the $1,000 test accounts, so their bigger bets don't
+  // drown the $100 lineup; their positions and history still show, and the phone charts them on their own.
+  const no1k = " AND strategy NOT LIKE '%\\_1k' ESCAPE '\\'";
 
   // One account's view: open positions marked at what they'd sell for, history, totals.
   const block = async (mode: 'paper' | 'live') => {
     const open = await q<any>(`SELECT * FROM bot_positions WHERE mode = ? AND status = 'open'${scope} ORDER BY opened_at DESC LIMIT 50`, mode);
     const history = await q<any>(`SELECT * FROM bot_positions WHERE mode = ? AND status != 'open'${scope} ORDER BY closed_at DESC LIMIT 100`, mode);
     const totals = (await q<{ realized: number | null; n: number; wins: number; fees: number | null; staked: number | null }>(
-      `SELECT SUM(pnl) AS realized, COUNT(*) AS n, SUM(pnl > 0) AS wins, SUM(fees) AS fees, SUM(cost) AS staked FROM bot_positions WHERE mode = ? AND status != 'open'${scope}`, mode))[0];
+      `SELECT SUM(pnl) AS realized, COUNT(*) AS n, SUM(pnl > 0) AS wins, SUM(fees) AS fees, SUM(cost) AS staked FROM bot_positions WHERE mode = ? AND status != 'open'${scope}${no1k}`, mode))[0];
     let unrealized = 0, atRisk = 0;
     const positions = [];
     for (const p of open) {
@@ -333,9 +336,9 @@ async function bot(env: Env, book: Book) {
   for (const k of Object.keys(BOOKS) as Book[]) {
     const r = (await q<any>(`SELECT COUNT(*) AS n, SUM(pnl > 0) AS wins, COALESCE(SUM(pnl), 0) AS pnl, COALESCE(SUM(cost), 0) AS staked,
         COUNT(DISTINCT strategy) AS strategies, COUNT(DISTINCT market_slug) AS markets, MIN(opened_at) AS since
-      FROM bot_positions WHERE mode = 'paper' AND status != 'open' AND strategy LIKE ?`, BOOKS[k]))[0] || {};
+      FROM bot_positions WHERE mode = 'paper' AND status != 'open' AND strategy LIKE ?${no1k}`, BOOKS[k]))[0] || {};
     const best = (await q<any>(`SELECT strategy, SUM(pnl) AS pnl, SUM(cost) AS staked FROM bot_positions
-      WHERE mode = 'paper' AND status != 'open' AND strategy LIKE ? GROUP BY strategy ORDER BY SUM(pnl) DESC LIMIT 1`, BOOKS[k]))[0] || null;
+      WHERE mode = 'paper' AND status != 'open' AND strategy LIKE ?${no1k} GROUP BY strategy ORDER BY SUM(pnl) DESC LIMIT 1`, BOOKS[k]))[0] || null;
     const open = (await q<{ n: number }>(`SELECT COUNT(*) AS n FROM bot_positions WHERE mode = 'paper' AND status = 'open' AND strategy LIKE ?`, BOOKS[k]))[0]?.n || 0;
     compare[k] = {
       closed: r.n || 0, wins: r.wins || 0, pnl: r.pnl || 0, staked: r.staked || 0, roi: r.staked ? r.pnl / r.staked : null,
@@ -348,7 +351,7 @@ async function bot(env: Env, book: Book) {
   let lab = null;
   try { lab = labRow ? { ...JSON.parse(labRow.v), at: labRow.at } : null; } catch { lab = null; }
   const run = (await q<{ n: number; pnl: number | null; staked: number | null; fees: number | null }>(`SELECT COUNT(*) AS n, SUM(pnl) AS pnl, SUM(cost) AS staked, SUM(fees) AS fees
-    FROM bot_positions WHERE mode = 'paper' AND status != 'open'${scope} AND COALESCE(json_extract(meta, '$.rules'), 0) >= ?`, RULES))[0] || null;
+    FROM bot_positions WHERE mode = 'paper' AND status != 'open'${scope}${no1k} AND COALESCE(json_extract(meta, '$.rules'), 0) >= ?`, RULES))[0] || null;
   return {
     book, books: Object.keys(BOOKS), mode: liveOn ? 'live' : 'paper', allocation, sports, rules: RULES, lab, run,
     model, live, ready, risk, compare, exits, records,
@@ -361,7 +364,11 @@ async function bot(env: Env, book: Book) {
 // totals for everything, bitcoin and basketball, plus a small running total per strategy for the
 // sparklines. Open positions are added on the phone from /api/bot, so the line ends at "now".
 const SPANS: Record<string, number> = { '1h': 3_600_000, '1d': 86_400_000, '1w': 7 * 86_400_000 };
-const groupOf = (strategy: string | null) => (strategy?.startsWith('crypto_') ? 'btc' : strategy?.startsWith('hoops_') ? 'hoops' : 'other');
+// The $1,000 test accounts (ids ending _1k) are their own group, so they never swamp the $100 lineup's line.
+const groupOf = (strategy: string | null) => {
+  const k = strategy?.endsWith('_1k') ? '1k' : '';
+  return strategy?.startsWith('crypto_') ? `btc${k}` : strategy?.startsWith('hoops_') ? `hoops${k}` : 'other';
+};
 
 async function botCurve(env: Env, range: string, mode: 'paper' | 'live') {
   const now = Date.now();
@@ -376,7 +383,7 @@ async function botCurve(env: Env, range: string, mode: 'paper' | 'live') {
   }
   const N = 120, S = 24;
   const step = (now - from) / N;
-  const groups = ['all', 'btc', 'hoops'] as const;
+  const groups = ['all', 'btc', 'hoops', 'btc1k', 'hoops1k'] as const;
   const sum: Record<string, number[]> = {}, n: Record<string, number[]> = {};
   const wins: Record<string, number> = {}, losses: Record<string, number> = {};
   for (const g of groups) { sum[g] = new Array(N).fill(0); n[g] = new Array(N).fill(0); wins[g] = 0; losses[g] = 0; }
@@ -412,7 +419,7 @@ async function botCurve(env: Env, range: string, mode: 'paper' | 'live') {
   return {
     range, from, to: now,
     t: Array.from({ length: N }, (_, i) => Math.round(from + (i + 1) * step)),
-    all: running(sum.all), btc: running(sum.btc), hoops: running(sum.hoops),
+    all: running(sum.all), btc: running(sum.btc), hoops: running(sum.hoops), btc1k: running(sum.btc1k), hoops1k: running(sum.hoops1k),
     n, wins, losses,
     strat: Object.fromEntries(Object.entries(strat).map(([k, v]) => [k, running(v)])),
     per,
