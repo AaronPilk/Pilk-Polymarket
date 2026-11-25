@@ -586,7 +586,31 @@ async function loadCurve(range, mode) {
 }
 // Each bot shows only its own book: the Bitcoin bot's paper lineup (and real money once it trades),
 // or the Sports bot's paper lineup. They're never added together.
-const botGroups = (b) => (b?.book === 'sports' ? ['hoops', ...SIZES.map(([k]) => `hoops${k}`)] : [...(b?.live ? ['live'] : []), 'btc', ...SIZES.map(([k]) => `btc${k}`)]);
+const botGroups = (b) => (b?.book === 'sports' ? ['hoops'] : [...(b?.live ? ['live'] : []), 'btc']);
+// Nov 25: one card per strategy with its $100 / $1K / $5K / $10K accounts inside it, and the headline number counts
+// only the $100 accounts of strategies still running (retired ones are listed apart, never mixed in).
+// A bigger copy's own strategy: crypto_fav_99_1m_10k -> crypto_fav_99_1m; model value's copies drop the _v1
+// (hoops_value_1k -> hoops_value_v1).
+const baseOf = (id) => { const b = String(id || '').replace(/_(1k|5k|10k)$/, ''); return STRATEGY_LABEL[b] ? b : STRATEGY_LABEL[`${b}_v1`] ? `${b}_v1` : b; };
+const copyOf = (id, k) => Object.keys(STRATEGY_LABEL).find((x) => x.endsWith(`_${k}`) && baseOf(x) === id) || null;
+const statusOfId = (b, id) => b?.lab?.strategies?.[id]?.status || 'testing';
+const activeBase = (b, group) => Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === group && statusOfId(b, id) !== 'retired');
+const retiredBase = (b, group) => Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === group && statusOfId(b, id) === 'retired');
+// Several strategies' bet-by-bet lines added into one: each line's steps, merged in time order.
+function mergedLine(c, ids) {
+  const ev = [];
+  let w = 0, n = 0;
+  for (const id of ids) {
+    const s = c.per?.[id];
+    if (!s) continue;
+    w += s.w || 0; n += s.n || 0;
+    let prev = 0;
+    for (const [sec, y] of s.pts) { ev.push([sec, y - prev]); prev = y; }
+  }
+  ev.sort((a, z) => a[0] - z[0]);
+  let cum = 0;
+  return { pts: ev.map(([sec, d]) => [sec, (cum = Math.round((cum + d) * 100) / 100)]), w, n };
+}
 
 // /api/bot every 5 s while the tab is open; the chart data every 30 s, or right away when a trade
 // closes so the line steps the moment it happens.
@@ -733,13 +757,18 @@ function botSeries() {
     pts[0].t = from;
     for (const p of raw) { pts.push({ t: p.t, y: pts.at(-1).y, n: 0, step: true }); pts.push({ t: p.t, y: p.y, n: 1 }); }
     wins = s?.w || 0; losses = (s?.n || 0) - wins;
-  } else {
+  } else if (live) {
     const ys = c[g] || [], ns = c.n?.[g] || [];
     for (let i = 0; i < c.t.length; i++) pts.push({ t: c.t[i], y: ys[i] ?? 0, n: ns[i] ?? 0 });
     wins = c.wins?.[g] || 0; losses = c.losses?.[g] || 0;
+  } else {
+    // The headline: the $100 accounts of the strategies still running, added together.
+    const ids = activeBase(b, g), m = mergedLine(c, ids);
+    for (const [sec, y] of m.pts) { pts.push({ t: c.from + sec * 1000, y: pts.at(-1).y, n: 0, step: true }); pts.push({ t: c.from + sec * 1000, y, n: 1 }); }
+    wins = m.w; losses = m.n - m.w;
   }
-  const open = openFor(b, live ? null : focus || g, live);
-  if (focus) pts.push({ t: now, y: pts.at(-1).y, n: 0, step: true });
+  const open = live ? openFor(b, null, true) : focus ? openFor(b, focus) : activeBase(b, g).reduce((t, id) => t + openFor(b, id), 0);
+  if (!live) pts.push({ t: now, y: pts.at(-1).y, n: 0, step: true });
   pts.push({ t: now, y: pts.at(-1).y + open, n: 0, now: true });
   return { pts, from, to: now, open, wins, losses };
 }
@@ -761,7 +790,7 @@ function paintBotChips() {
   const groups = botGroups(b);
   const chips = groups.length > 1 ? groups.map((g) => `<button class="chip ${store.botGroup === g && !store.botFocus ? 'on' : ''}" data-group="${g}">${CHIP_LABEL[g] || GROUP_LABEL[g]}</button>`) : [];
   if (store.botFocus) {
-    if (!chips.length) chips.push(`<button class="chip" data-unfocus>All strategies</button>`);
+    if (!chips.length) chips.push(`<button class="chip" data-unfocus>All active strategies</button>`);
     chips.push(`<button class="chip on" data-unfocus>${esc(variantOf(store.botFocus))} <span aria-hidden="true">✕</span></button>`);
   }
   el.innerHTML = chips.join('');
@@ -791,33 +820,39 @@ function paintStratGrid() {
   if (!el || !b) return;
   const c = store.botCurve[curveKey('paper')]?.data;
   if (!c) { el.innerHTML = '<div class="card empty">Loading…</div>'; return; }
-  const group = store.botGroup === 'live' ? BOOK_GROUP[b.book || 'btc'] : store.botGroup;
-  const lab = b.lab?.strategies || {};
-  const cards = Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === group).map((id) => {
+  const group = BOOK_GROUP[b.book || 'btc'];
+  const acct = (id) => {
     const s = c.per?.[id] || { n: 0, w: 0, pnl: 0, staked: 0, pts: [] };
     const open = openFor(b, id);
     const nOpen = (b.positions || []).filter((p) => p.strategy === id && (store.botRange !== 'run' || onRulesPos(p, b))).length;
-    return { id, s, open, nOpen, total: s.pnl + open, status: lab[id]?.status || 'testing' };
-  });
-  const live = cards.filter((x) => x.status !== 'retired'), retired = cards.filter((x) => x.status === 'retired');
-  const order = (xs) => xs.sort((a, z) => (z.s.n || z.nOpen ? 1 : 0) - (a.s.n || a.nOpen ? 1 : 0) || z.total - a.total);
-  const card = (x) => {
+    return { id, s, open, nOpen, total: s.pnl + open, status: statusOfId(b, id), any: !!(s.n || nOpen) };
+  };
+  // One card per strategy: its $100 account on top (the chart), then the bigger copies of it, if any.
+  const cards = Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === group).map((id) => ({
+    base: acct(id),
+    sizes: SIZES.map(([k]) => { const cid = copyOf(id, k); return cid ? { ...acct(cid), label: `$${k.toUpperCase()}` } : null; }).filter(Boolean),
+  }));
+  const running = cards.filter((x) => x.base.status !== 'retired'), retired = cards.filter((x) => x.base.status === 'retired');
+  const order = (xs) => xs.sort((a, z) => (z.base.any ? 1 : 0) - (a.base.any ? 1 : 0) || z.base.total - a.base.total);
+  const row = (x, label) => `<div class="sc-row ${store.botFocus === x.id ? 'on' : ''} ${x.status === 'retired' ? 'dim' : ''}" data-strat="${x.id}">
+      <span>${label}</span><span class="num ${x.any ? tone(x.total) : 'faint'}">${x.any ? money(x.total, { sign: true }) : '–'}</span>${x.status === 'retired' ? '<span class="sc-tag">retired</span>' : ''}</div>`;
+  const card = ({ base: x, sizes }) => {
     const { s } = x, pill = STATUS_PILL[x.status] || ['', x.status];
-    const roi = s.staked > 0 ? ` · ${signedPct(s.pnl / s.staked, 0)}` : '';
-    const sub = s.n ? `${s.w}–${s.n - s.w}${roi}` : x.nOpen ? 'no closed bets yet' : 'no bets in this range';
+    const sub = s.n ? `${s.w}–${s.n - s.w}${s.staked > 0 ? ` · ${signedPct(s.pnl / s.staked, 0)}` : ''}` : x.nOpen ? 'no closed bets yet' : 'no bets in this range';
     return `<button class="strat-card ${store.botFocus === x.id ? 'on' : ''} ${x.status === 'retired' ? 'dim' : ''}" data-strat="${x.id}">
       <div class="sc-top"><span class="sc-name">${esc(variantOf(x.id))}</span></div>
-      <div class="sc-amt num ${tone(x.total)}">${s.n || x.nOpen ? money(x.total, { sign: true }) : '–'}</div>
+      <div class="sc-amt num ${tone(x.total)}">${x.any ? money(x.total, { sign: true }) : '–'}</div>
       ${miniChart(s.pts, x.open)}
       <div class="sc-foot"><span>${sub}</span>${pill[1] ? `<span class="pill ${pill[0]}">${pill[1]}</span>` : ''}</div>
       ${x.nOpen ? `<div class="sc-open">${x.nOpen} open ${money(x.open, { sign: true })}</div>` : ''}
+      ${sizes.length ? `<div class="sc-sizes"><div class="sc-sizes-h">Same rules, bigger accounts</div>${sizes.map((z) => row(z, z.label)).join('')}</div>` : ''}
     </button>`;
   };
   $('#bot-grid-sub').textContent = 'tap one to chart it';
-  el.innerHTML = `<div class="strat-grid">${order(live).map(card).join('')}</div>
+  el.innerHTML = `<div class="strat-grid">${order(running).map(card).join('')}</div>
     ${retired.length ? `<button class="more" data-retired-toggle>${store.showRetired ? 'Hide' : 'Show'} ${retired.length} retired</button>
     ${store.showRetired ? `<div class="strat-grid">${order(retired).map(card).join('')}</div>` : ''}` : ''}
-    <div class="row-sub wrap pad">Each card is one strategy's own $100 paper account: its P&L in this range including open bets, wins–losses, and return on the money it bet. Each chart is on its own scale and runs bet by bet, so compare the dollar numbers, not the heights.</div>`;
+    <div class="row-sub wrap pad">The big number on each card is the strategy's $100 test account. Under it, the same strategy copied onto bigger accounts, each with its own money. A copy marked retired lost money beyond luck and has stopped betting. The headline at the top adds up only the $100 accounts of strategies still running. Tap a card or a row to chart it alone.</div>`;
 }
 
 const botTime = (t) => (store.botRange === '1h' || store.botRange === '1d'
@@ -832,7 +867,7 @@ function paintBotHero() {
     ? `<span class="pill ${b.live?.on ? 'won' : 'lost'}" style="vertical-align:2px;margin-left:4px">${b.live?.on ? 'Live' : 'Off'}</span>`
     : '<span class="pill open" style="vertical-align:2px;margin-left:4px">Paper</span>';
   const focus = !live && store.botFocus;
-  $('#bot-label').innerHTML = `${live ? 'Real money' : focus ? esc(variantOf(focus)) : GROUP_LABEL[store.botGroup]} · ${BOT_RANGE_LABEL[store.botRange]} ${pill}`;
+  $('#bot-label').innerHTML = `${live ? 'Real money' : focus ? esc(variantOf(focus)) : `${GROUP_LABEL[store.botGroup]} · active strategies`} · ${BOT_RANGE_LABEL[store.botRange]} ${pill}`;
   const fallback = live ? (b.live?.realized || 0) + (b.live?.unrealized || 0) : (b.realized || 0) + (b.unrealized || 0);
   const v = S ? S.pts.at(-1).y : fallback;
   const el = $('#bot-value');
@@ -841,16 +876,20 @@ function paintBotHero() {
   const parts = [];
   if (live && b.live) parts.push(`<span>Account <b>${money(b.live.equity)}</b></span>`);
   // Paper: every strategy runs its own account, so the total is out of all of them together.
-  const nAcc = Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === store.botGroup).length;
+  const nAcc = live ? 0 : activeBase(b, store.botGroup).length;
   const bankEach = groupBank(store.botGroup, b), paperCap = nAcc * bankEach;
-  const base = store.botGroup === BOOK_GROUP[b.book || 'btc'];
+  const base = false;   // fee and all-time lines retired Nov 25: they mixed in retired tests
   if (focus) {
     const s = store.botCurve[curveKey('paper')]?.data?.per?.[focus];
     const st = b.lab?.strategies?.[focus];
     if (s?.staked > 0) parts.push(`<span><b class="${tone(s.pnl)}">${signedPct(s.pnl / s.staked)}</b> on ${money(s.staked)} bet</span>`);
     if (st) parts.push(`<span class="pill ${STATUS_PILL[st.status]?.[0] || ''}">${STATUS_PILL[st.status]?.[1] || esc(st.status)}</span>`);
   }
-  if (!live && !focus && paperCap > 0) parts.push(`<span><b class="${tone(v)}">${signedPct(v / paperCap)}</b> of ${money(paperCap, { cents: false })} paper (${nAcc} account${nAcc === 1 ? '' : 's'} × ${money(bankEach, { cents: false })})</span>`);
+  if (!live && !focus && paperCap > 0) parts.push(`<span><b class="${tone(v)}">${signedPct(v / paperCap)}</b> of ${money(paperCap, { cents: false })} paper (${nAcc} active strateg${nAcc === 1 ? 'y' : 'ies'} × ${money(bankEach, { cents: false })})</span>`);
+  if (!live && !focus) {
+    const c = store.botCurve[curveKey('paper')]?.data, ret = retiredBase(b, store.botGroup).reduce((t, id) => t + (c?.per?.[id]?.pnl || 0), 0);
+    if (Math.abs(ret) >= 0.005) parts.push(`<span>Retired strategies, not counted: <b class="${tone(ret)}">${money(ret, { sign: true })}</b></span>`);
+  }
   // Fees so far, as a share of the money bet, and what the same trades would cost through the API
   // (flat 0.0695 with 70% rebated, Nov 21 to Dec 31, 2026) against paper's full 0.095.
   const onRun = store.botRange === 'run' && b.run;
