@@ -160,8 +160,12 @@ const HOOPS_STRATEGIES: HoopsStrategy[] = [
 ];
 // Nov 24-25, Aaron: model value run again as if the account started at $1,000, $5,000 and $10,000 (each its own
 // paper account, sized off its own bankroll).
+// Nov 25, Aaron ("test them all"): model value with no adds. Overnight its Colorado bet grew from about 3% to
+// 4-8% of the account by adding as the price fell, and lost. This copy buys once and never adds.
+HOOPS_STRATEGIES.push({ ...HOOPS_STRATEGIES.find((s) => s.id === 'hoops_value_v1')!, id: 'hoops_value_noadd', maxAdds: 0 });
 for (const [k, bank] of [['1k', 1000], ['5k', 5000], ['10k', 10000]] as const) {
   HOOPS_STRATEGIES.push({ ...HOOPS_STRATEGIES.find((s) => s.id === 'hoops_value_v1')!, id: `hoops_value_${k}`, bank });
+  HOOPS_STRATEGIES.push({ ...HOOPS_STRATEGIES.find((s) => s.id === 'hoops_value_noadd')!, id: `hoops_value_noadd_${k}`, bank });
 }
 export const HOOPS_IDS = HOOPS_STRATEGIES.map((s) => s.id);
 const MAX_EDGE = 0.12;          // a bigger "edge" is more likely our data being stale than a gift

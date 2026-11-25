@@ -545,6 +545,14 @@ const STRATEGY_LABEL = {
   crypto_fav_98_calm_10k: 'Bitcoin · 98–99¢ favorite, 3 min left, steady price ($10,000)',
   crypto_fav_98_1h_10k: 'Bitcoin · 98–99¢ favorite, hourly, 4–14 min left ($10,000)',
   hoops_value_10k: 'Basketball · model value ($10,000)',
+  crypto_fav_99_1m_long: 'Bitcoin · 98–99¢ favorite, 1 min left, 15-min and hourly only',
+  hoops_value_noadd: 'Basketball · model value, no adds',
+  crypto_fav_99_1m_long_1k: 'Bitcoin · 98–99¢ favorite, 1 min left, 15-min and hourly only ($1,000)',
+  hoops_value_noadd_1k: 'Basketball · model value, no adds ($1,000)',
+  crypto_fav_99_1m_long_5k: 'Bitcoin · 98–99¢ favorite, 1 min left, 15-min and hourly only ($5,000)',
+  hoops_value_noadd_5k: 'Basketball · model value, no adds ($5,000)',
+  crypto_fav_99_1m_long_10k: 'Bitcoin · 98–99¢ favorite, 1 min left, 15-min and hourly only ($10,000)',
+  hoops_value_noadd_10k: 'Basketball · model value, no adds ($10,000)',
 };
 const variantOf = (id) => (STRATEGY_LABEL[id] || id || '').split(' · ')[1] || '';
 const bookOf = (s) => (s?.startsWith('crypto_') ? 'btc' : s?.startsWith('hoops_') ? 'sports' : 'other');

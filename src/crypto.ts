@@ -213,9 +213,13 @@ const CRYPTO_STRATEGIES: CryptoStrategy[] = [
 // $5,000 and $10,000. Same rules, their own paper accounts (the _1k / _5k / _10k ids), each sized off its own
 // bankroll that grows or shrinks with its results, on the ladder's rung for that size. Paper only: real money
 // only ever trades LIVE_STRATEGY on BOT_ALLOCATION.
+// Nov 25, Aaron ("test them all"): the 1-minute favorite's three overnight losses were all 5-minute windows
+// (176-3 there, 53-0 on 15-minute and hourly), so a copy that skips 5-minute windows runs next to it. Thin
+// evidence (three losses), which is why it's a separate test and the original keeps running unchanged.
+CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === 'crypto_fav_99_1m')!, id: 'crypto_fav_99_1m_long', series: ['15m', '1h'] });
 export const BIG_BANKS: [string, number][] = [['1k', 1000], ['5k', 5000], ['10k', 10000]];
 for (const [k, bank] of BIG_BANKS) {
-  for (const id of ['crypto_fav_99_1m', 'crypto_fav_98_calm', 'crypto_fav_98_1h']) {
+  for (const id of ['crypto_fav_99_1m', 'crypto_fav_98_calm', 'crypto_fav_98_1h', 'crypto_fav_99_1m_long']) {
     CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === id)!, id: `${id}_${k}`, bank });
   }
 }
