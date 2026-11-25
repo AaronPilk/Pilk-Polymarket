@@ -45,6 +45,11 @@ const MAX_SLEEP = 10 * MIN;
 // How long after the start a match can still be live: T20 about 3.5 h, 50 overs about 8 h, first-class 4-5 days.
 const LIVE_FOR: Record<string, number> = { t20: 5 * 60 * MIN, odi: 10 * 60 * MIN, multi: 5 * 24 * 60 * MIN };
 const FLIP_AFTER = 90_000;
+// ESPN league ids for the per-league scoreboard fallback (checked Nov 25 against live scoreboards).
+const LEAGUE_IDS: Record<string, string> = {
+  smat: '8661', wbbl: '21284', sheffield: '8043', plunket: '8828', hjs: '8818', ford: '8880', bbl: '8044', sa20: '21275', ilt20: '20921',
+  testcr: '24469', t20icr: '24273', pro50: '20676', csafc: '20675',
+};
 
 type Side = 'long' | 'short';
 interface CricketEnv { DB: D1Database; BOT_ALLOCATION?: string; BOT_MAX_BET?: string; CRICKET?: string }
@@ -171,17 +176,43 @@ export class CricketFeed extends DurableObject<CricketEnv> {
   }
 
   private async score(now: number, games: Mkt[]) {
-    for (const host of ESPN) {
+    // ESPN: the all-cricket scorepanel first; if a host refuses it, each live league's own scoreboard (league
+    // ids from the scorepanel's league list, or LEAGUE_IDS). Every host's answer is kept for the status row.
+    const tried: string[] = [];
+    const urls = ESPN.map((h) => `https://${h}/apis/site/v2/sports/cricket/scorepanel?_=${Math.floor(now / 2000)}`);
+    let got = false;
+    for (const u of urls) {
       try {
-        const res = await fetch(`https://${host}/apis/site/v2/sports/cricket/scorepanel?_=${Math.floor(now / 2000)}`, { headers: UA });
-        this.espnStatus = `${host} ${res.status}`;
+        const res = await fetch(u, { headers: UA });
+        tried.push(`${new URL(u).host} ${res.status}`);
         if (!res.ok) continue;
         const body: any = await res.json();
         this.events = (body.scores || []).flatMap((s: any) => (s.events || []).map((e: any) => ({ ...e, _league: s.leagues?.[0]?.name || '' })));
-        this.scoreAt = now;
+        got = true;
         break;
-      } catch (e) { this.espnStatus = `${host} error ${String((e as any)?.message || e).slice(0, 80)}`; }
+      } catch (e) { tried.push(`${new URL(u).host} error ${String((e as any)?.message || e).slice(0, 60)}`); }
     }
+    if (!got) {
+      const ids = [...new Set(games.map((m) => LEAGUE_IDS[m.league.replace(/^cricket:/, '')]).filter(Boolean))];
+      const evs: any[] = [];
+      for (const id of ids) {
+        for (const h of ESPN) {
+          try {
+            const res = await fetch(`https://${h}/apis/site/v2/sports/cricket/${id}/scoreboard?_=${Math.floor(now / 2000)}`, { headers: UA });
+            tried.push(`${h}/${id} ${res.status}`);
+            if (!res.ok) continue;
+            const body: any = await res.json();
+            evs.push(...(body.events || []).map((e: any) => ({ ...e, _league: body.leagues?.[0]?.name || '' })));
+            got = true;
+            break;
+          } catch (e) { tried.push(`${h}/${id} error`); }
+        }
+      }
+      if (got) this.events = evs;
+    }
+    if (got) this.scoreAt = now;
+    else this.scoreAt = now - SCORE_EVERY + 15_000;   // refused everywhere: try again in 15 s, not every tick
+    this.espnStatus = tried.join(', ').slice(0, 300);
     const save: D1PreparedStatement[] = [];
     for (const m of games) {
       if (!m.espn_id) {
