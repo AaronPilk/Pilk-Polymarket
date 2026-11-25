@@ -130,7 +130,10 @@ export function judge(id: string, rows: ReadyRow[], book: Book): Verdict {
   }
   const { wins, losses } = outcomes(rows), rare = Math.min(wins, losses);
   const stale = s.n >= lab.judge * 3 && t < 0.5;
-  if (stale && rare >= RARE) {
+  // Nov 25, Aaron ("why would we retire a strategy that is literally making money?"): paper bets cost nothing
+  // real, so "nothing to show" only retires a strategy that is also behind. One that's ahead but not yet beyond
+  // luck keeps testing. Losing beyond luck still retires anything at any time.
+  if (stale && rare >= RARE && s.mean <= 0) {
     return { ...base, status: 'retired', reason: `Nothing to show after ${s.n} bets: ${pct(s.mean)} a dollar (t ${t.toFixed(1)}). Fees for no edge.` };
   }
   const gt = g.mean != null && g.se != null && g.se > 0 ? g.mean / g.se : null;

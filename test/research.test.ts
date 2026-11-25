@@ -43,6 +43,10 @@ test('research board: losing beyond luck retires; a clear winner is promising, t
   const stale = judge('crypto_test_v1', rows(95, 12, (i) => (i % 2 ? 0.5 : -0.5)), 'btc');
   assert.equal(stale.status, 'retired');
   assert.match(stale.reason, /Nothing to show after 95 bets/);
+  // ahead but not beyond luck after the same bets: keeps testing (paper bets cost nothing real)
+  const aheadStale = judge('crypto_test_v1', rows(95, 12, (i) => (i % 2 ? 0.56 : -0.5)), 'btc');
+  assert.ok(aheadStale.t! < 0.5, `t ${aheadStale.t}`);
+  assert.equal(aheadStale.status, 'testing');
 });
 
 test('research board: ideas the evidence contradicts stay retired; top 3 ranks proven, then promising by worst case', () => {
@@ -133,11 +137,14 @@ test('research board: a bet that rarely loses (or rarely wins) is not called poi
   assert.ok(thin.t! < 0.5, `t ${thin.t}`);
   assert.equal(thin.status, 'testing');
   assert.match(thin.reason, /Only 3 losses so far: a bet that rarely loses needs 10/);
-  // 10 losses in 600 and still nothing: retired like anything else
+  // 10 losses in 600, slightly ahead but not beyond luck: keeps testing (Nov 25: paper bets cost nothing)
   const enough = judge('crypto_fav_98', fav(600, 60, 55), 'btc');
   assert.ok(enough.t! < 0.5, `t ${enough.t}`);
-  assert.equal(enough.status, 'retired');
-  assert.match(enough.reason, /Nothing to show after 600 bets/);
+  assert.equal(enough.status, 'testing');
+  // 12 losses in 600 and behind: retired like anything else
+  const behind = judge('crypto_fav_98', fav(600, 60, 50), 'btc');
+  assert.equal(behind.status, 'retired');
+  assert.match(behind.reason, /Nothing to show after 600 bets|Losing beyond luck/);
   // losing beyond luck doesn't wait for 10 losses: 6 in 60 retires it
   const bad = judge('crypto_fav_98', fav(60, 12, 10), 'btc');
   assert.equal(bad.status, 'retired');

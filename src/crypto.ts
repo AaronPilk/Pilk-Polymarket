@@ -225,13 +225,13 @@ CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === 'crypto_fav_9
 CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === 'crypto_fav_99_1m')!, id: 'crypto_fav_99_1m_stop', stopAt: 0.9 });
 export const BIG_BANKS: [string, number][] = [['1k', 1000], ['5k', 5000], ['10k', 10000]];
 for (const [k, bank] of BIG_BANKS) {
-  for (const id of ['crypto_fav_99_1m', 'crypto_fav_98_calm', 'crypto_fav_98_1h', 'crypto_fav_99_1m_long', 'crypto_fav_99_1m_stop']) {
+  for (const id of ['crypto_fav_99_1m', 'crypto_fav_98_calm', 'crypto_fav_98_1h', 'crypto_fav_99_1m_long', 'crypto_fav_99_1m_stop', 'crypto_fav_98']) {
     CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === id)!, id: `${id}_${k}`, bank });
   }
 }
 // Nov 25, Aaron: profit lock. $1,000 copies of the two unbeaten favorites that set aside half of every new high
 // (see bankroll's `lock`), run next to the plain $1,000 copies so the two lines can be compared directly.
-for (const id of ['crypto_fav_98_calm', 'crypto_fav_99_1m_long']) {
+for (const id of ['crypto_fav_98_calm', 'crypto_fav_99_1m_long', 'crypto_fav_98']) {
   CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === id)!, id: `${id}_lock_1k`, bank: 1000, lock: 0.5 });
 }
 const BY_ID = new Map(CRYPTO_STRATEGIES.map((s) => [s.id, s]));
