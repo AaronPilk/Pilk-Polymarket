@@ -213,7 +213,7 @@ async function bot(env: Env, book: Book) {
   const scope = ` AND strategy LIKE '${BOOKS[book]}'`;
   // Book totals, the run and the head-to-head leave out the $1,000 test accounts, so their bigger bets don't
   // drown the $100 lineup; their positions and history still show, and the phone charts them on their own.
-  const no1k = " AND strategy NOT LIKE '%\\_1k' ESCAPE '\\'";
+  const no1k = " AND NOT (strategy LIKE '%\\_1k' ESCAPE '\\' OR strategy LIKE '%\\_5k' ESCAPE '\\' OR strategy LIKE '%\\_10k' ESCAPE '\\')";
 
   // One account's view: open positions marked at what they'd sell for, history, totals.
   const block = async (mode: 'paper' | 'live') => {
@@ -364,9 +364,9 @@ async function bot(env: Env, book: Book) {
 // totals for everything, bitcoin and basketball, plus a small running total per strategy for the
 // sparklines. Open positions are added on the phone from /api/bot, so the line ends at "now".
 const SPANS: Record<string, number> = { '1h': 3_600_000, '1d': 86_400_000, '1w': 7 * 86_400_000 };
-// The $1,000 test accounts (ids ending _1k) are their own group, so they never swamp the $100 lineup's line.
+// The big test accounts (ids ending _1k, _5k, _10k) are their own groups, so they never swamp the $100 lineup's line.
 const groupOf = (strategy: string | null) => {
-  const k = strategy?.endsWith('_1k') ? '1k' : '';
+  const k = strategy?.match(/_(1k|5k|10k)$/)?.[1] ?? '';
   return strategy?.startsWith('crypto_') ? `btc${k}` : strategy?.startsWith('hoops_') ? `hoops${k}` : 'other';
 };
 
@@ -383,7 +383,7 @@ async function botCurve(env: Env, range: string, mode: 'paper' | 'live') {
   }
   const N = 120, S = 24;
   const step = (now - from) / N;
-  const groups = ['all', 'btc', 'hoops', 'btc1k', 'hoops1k'] as const;
+  const groups = ['all', 'btc', 'hoops', 'btc1k', 'hoops1k', 'btc5k', 'hoops5k', 'btc10k', 'hoops10k'] as const;
   const sum: Record<string, number[]> = {}, n: Record<string, number[]> = {};
   const wins: Record<string, number> = {}, losses: Record<string, number> = {};
   for (const g of groups) { sum[g] = new Array(N).fill(0); n[g] = new Array(N).fill(0); wins[g] = 0; losses[g] = 0; }
@@ -420,6 +420,7 @@ async function botCurve(env: Env, range: string, mode: 'paper' | 'live') {
     range, from, to: now,
     t: Array.from({ length: N }, (_, i) => Math.round(from + (i + 1) * step)),
     all: running(sum.all), btc: running(sum.btc), hoops: running(sum.hoops), btc1k: running(sum.btc1k), hoops1k: running(sum.hoops1k),
+    btc5k: running(sum.btc5k), hoops5k: running(sum.hoops5k), btc10k: running(sum.btc10k), hoops10k: running(sum.hoops10k),
     n, wins, losses,
     strat: Object.fromEntries(Object.entries(strat).map(([k, v]) => [k, running(v)])),
     per,

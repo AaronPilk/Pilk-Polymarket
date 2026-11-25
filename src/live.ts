@@ -158,8 +158,11 @@ const HOOPS_STRATEGIES: HoopsStrategy[] = [
   { id: 'hoops_lead_late', maxOpen: 10, trailing: false, leading: true, minLead: 15, leagues: ['cbb'], maxProgress: 1, minDiscount: 0,
     veto: () => -1, priceMin: 0.7, priceMax: 0.97, lateWindow: [3, 10], maxAdds: 0, oneShot: true, hold: true },
 ];
-// Nov 24, Aaron: model value run again as if the account started at $1,000 (its own paper account, sized off it).
-HOOPS_STRATEGIES.push({ ...HOOPS_STRATEGIES.find((s) => s.id === 'hoops_value_v1')!, id: 'hoops_value_1k', bank: 1000 });
+// Nov 24-25, Aaron: model value run again as if the account started at $1,000, $5,000 and $10,000 (each its own
+// paper account, sized off its own bankroll).
+for (const [k, bank] of [['1k', 1000], ['5k', 5000], ['10k', 10000]] as const) {
+  HOOPS_STRATEGIES.push({ ...HOOPS_STRATEGIES.find((s) => s.id === 'hoops_value_v1')!, id: `hoops_value_${k}`, bank });
+}
 export const HOOPS_IDS = HOOPS_STRATEGIES.map((s) => s.id);
 const MAX_EDGE = 0.12;          // a bigger "edge" is more likely our data being stale than a gift
 // Our scoreboard can lag the market, worst around the buzzer, when ESPN posts the last baskets

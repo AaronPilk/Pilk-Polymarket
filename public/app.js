@@ -537,13 +537,27 @@ const STRATEGY_LABEL = {
   crypto_fav_98_calm_1k: 'Bitcoin · 98–99¢ favorite, 3 min left, steady price ($1,000)',
   crypto_fav_98_1h_1k: 'Bitcoin · 98–99¢ favorite, hourly, 4–14 min left ($1,000)',
   hoops_value_1k: 'Basketball · model value ($1,000)',
+  crypto_fav_99_1m_5k: 'Bitcoin · 98–99¢ favorite, 1 min left ($5,000)',
+  crypto_fav_98_calm_5k: 'Bitcoin · 98–99¢ favorite, 3 min left, steady price ($5,000)',
+  crypto_fav_98_1h_5k: 'Bitcoin · 98–99¢ favorite, hourly, 4–14 min left ($5,000)',
+  hoops_value_5k: 'Basketball · model value ($5,000)',
+  crypto_fav_99_1m_10k: 'Bitcoin · 98–99¢ favorite, 1 min left ($10,000)',
+  crypto_fav_98_calm_10k: 'Bitcoin · 98–99¢ favorite, 3 min left, steady price ($10,000)',
+  crypto_fav_98_1h_10k: 'Bitcoin · 98–99¢ favorite, hourly, 4–14 min left ($10,000)',
+  hoops_value_10k: 'Basketball · model value ($10,000)',
 };
 const variantOf = (id) => (STRATEGY_LABEL[id] || id || '').split(' · ')[1] || '';
 const bookOf = (s) => (s?.startsWith('crypto_') ? 'btc' : s?.startsWith('hoops_') ? 'sports' : 'other');
-const is1k = (s) => !!s?.endsWith('_1k');
-const groupOf = (s) => (s?.startsWith('crypto_') ? (is1k(s) ? 'btc1k' : 'btc') : s?.startsWith('hoops_') ? (is1k(s) ? 'hoops1k' : 'hoops') : 'other');
-const GROUP_LABEL = { live: 'Real money', btc: 'Paper · Bitcoin', hoops: 'Paper · Basketball', btc1k: 'Paper · Bitcoin $1,000', hoops1k: 'Paper · Basketball $1,000' };
-const groupBank = (g, b) => (String(g).endsWith('1k') ? 1000 : b?.allocation || 100);
+// The big test accounts: the same rules as if the account started at $1,000, $5,000 or $10,000 (ids end _1k/_5k/_10k).
+const SIZES = [['1k', 1000, '$1,000'], ['5k', 5000, '$5,000'], ['10k', 10000, '$10,000']];
+const sizeOf = (s) => String(s || '').match(/_(1k|5k|10k)$/)?.[1] || '';
+const is1k = (s) => !!sizeOf(s);
+const groupOf = (s) => (s?.startsWith('crypto_') ? `btc${sizeOf(s)}` : s?.startsWith('hoops_') ? `hoops${sizeOf(s)}` : 'other');
+const GROUP_LABEL = { live: 'Real money', btc: 'Paper · Bitcoin', hoops: 'Paper · Basketball',
+  ...Object.fromEntries(SIZES.flatMap(([k, , n]) => [[`btc${k}`, `Bitcoin ${n}`], [`hoops${k}`, `Basketball ${n}`]])) };
+// Short names for the chips over the chart, so all the account sizes fit on a phone.
+const CHIP_LABEL = { live: 'Real money', btc: '$100 accounts', hoops: '$100 accounts', ...Object.fromEntries(SIZES.flatMap(([k]) => [[`btc${k}`, `$${k.toUpperCase()}`], [`hoops${k}`, `$${k.toUpperCase()}`]])) };
+const groupBank = (g, b) => SIZES.find(([k]) => String(g).endsWith(k))?.[1] || b?.allocation || 100;
 const BOOK_LABEL = { btc: 'Bitcoin bot', sports: 'Sports bot' };
 const BOOK_GROUP = { btc: 'btc', sports: 'hoops' };
 const BOT_RANGE_LABEL = { run: 'This run, on the new rules', '1h': 'Last hour', '1d': 'Last 24 hours', '1w': 'Last 7 days', all: 'Since it started' };
@@ -560,7 +574,7 @@ async function loadCurve(range, mode) {
 }
 // Each bot shows only its own book: the Bitcoin bot's paper lineup (and real money once it trades),
 // or the Sports bot's paper lineup. They're never added together.
-const botGroups = (b) => (b?.book === 'sports' ? ['hoops', 'hoops1k'] : [...(b?.live ? ['live'] : []), 'btc', 'btc1k']);
+const botGroups = (b) => (b?.book === 'sports' ? ['hoops', ...SIZES.map(([k]) => `hoops${k}`)] : [...(b?.live ? ['live'] : []), 'btc', ...SIZES.map(([k]) => `btc${k}`)]);
 
 // /api/bot every 5 s while the tab is open; the chart data every 30 s, or right away when a trade
 // closes so the line steps the moment it happens.
@@ -733,7 +747,7 @@ function paintBotChips() {
   const b = store.bot, el = $('#bot-groups');
   if (!b || !el) return;
   const groups = botGroups(b);
-  const chips = groups.length > 1 ? groups.map((g) => `<button class="chip ${store.botGroup === g && !store.botFocus ? 'on' : ''}" data-group="${g}">${GROUP_LABEL[g]}</button>`) : [];
+  const chips = groups.length > 1 ? groups.map((g) => `<button class="chip ${store.botGroup === g && !store.botFocus ? 'on' : ''}" data-group="${g}">${CHIP_LABEL[g] || GROUP_LABEL[g]}</button>`) : [];
   if (store.botFocus) {
     if (!chips.length) chips.push(`<button class="chip" data-unfocus>All strategies</button>`);
     chips.push(`<button class="chip on" data-unfocus>${esc(variantOf(store.botFocus))} <span aria-hidden="true">✕</span></button>`);
@@ -1239,7 +1253,7 @@ function botRest(b) {
       <div class="section-title">All-time by strategy<small>each its own ${money(b.allocation, { cents: false })}</small></div>
       <div class="stats" style="margin-bottom:6px">${tiles.map(statTile).join('')}</div>
       ${stratGroup(group, `${book === 'btc' ? 'Bitcoin' : 'Basketball'} · $100 accounts`)}
-      ${stratGroup(`${group}1k`, `${book === 'btc' ? 'Bitcoin' : 'Basketball'} · $1,000 accounts`)}
+      ${SIZES.map(([k, , n]) => stratGroup(`${group}${k}`, `${book === 'btc' ? 'Bitcoin' : 'Basketball'} · ${n} accounts`)).join('')}
       ${book === 'sports' && !b.sports ? '<div class="card pad off-note"><b>The Sports bot is asleep.</b> SPORTS is set to off in Cloudflare.</div>' : ''}
     </div>
 

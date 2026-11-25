@@ -209,11 +209,15 @@ const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_fav_98_calm', minEdge: -1, priceMin: 0.98, priceMax: 0.99, tpBelow: 0, exitAbove: null, tauMin: 150, tauMax: 210, fav: true, calm: 0.01 },
   { id: 'crypto_fav_96_15m', minEdge: -1, priceMin: 0.95, priceMax: 0.98, tpBelow: 0, exitAbove: null, tauMin: 300, tauMax: 540, fav: true, series: ['15m'] },
 ];
-// Nov 24, Aaron: the three favorites that hadn't lost yet, run again as if the account started at $1,000. Same
-// rules, their own paper accounts (the _1k ids), sized off a $1,000 bankroll that grows or shrinks with its own
-// results, on the ladder's $1,000 rung. Paper only: real money only ever trades LIVE_STRATEGY on BOT_ALLOCATION.
-for (const id of ['crypto_fav_99_1m', 'crypto_fav_98_calm', 'crypto_fav_98_1h']) {
-  CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === id)!, id: `${id}_1k`, bank: 1000 });
+// Nov 24-25, Aaron: the three favorites that hadn't lost yet, run again as if the account started at $1,000,
+// $5,000 and $10,000. Same rules, their own paper accounts (the _1k / _5k / _10k ids), each sized off its own
+// bankroll that grows or shrinks with its results, on the ladder's rung for that size. Paper only: real money
+// only ever trades LIVE_STRATEGY on BOT_ALLOCATION.
+export const BIG_BANKS: [string, number][] = [['1k', 1000], ['5k', 5000], ['10k', 10000]];
+for (const [k, bank] of BIG_BANKS) {
+  for (const id of ['crypto_fav_99_1m', 'crypto_fav_98_calm', 'crypto_fav_98_1h']) {
+    CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === id)!, id: `${id}_${k}`, bank });
+  }
 }
 const BY_ID = new Map(CRYPTO_STRATEGIES.map((s) => [s.id, s]));
 export const CRYPTO_IDS = [...CRYPTO_STRATEGIES.map((s) => s.id), 'crypto_ladder_v1'];
