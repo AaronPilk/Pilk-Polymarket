@@ -35,7 +35,7 @@ import { bankroll, closePosition, loadOpen, openPosition, settlePosition, type P
 import { RULES, statusOf, type Status } from './research';
 
 const GATEWAY = 'https://gateway.polymarket.us';
-const ESPN = ['site.web.api.espn.com'];   // site.api.espn.com answers 404 for cricket
+const ESPN = ['site.api.espn.com', 'site.web.api.espn.com'];   // site.web answers 403 to Cloudflare; site.api serves the scorepanel
 const UA = { 'User-Agent': 'pilk-bets/1.0' };
 const TICK = 3_000;
 const SCORE_EVERY = 4_000;
