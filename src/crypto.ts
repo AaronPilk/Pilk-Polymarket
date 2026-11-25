@@ -176,6 +176,7 @@ interface CryptoStrategy {
   series?: string[];          // only these window lengths (default: all)
   calm?: number;              // only while the window's mid has moved this much or less over the last 30 s
   bank?: number;              // paper only: this account starts with this much instead of BOT_ALLOCATION
+  stopAt?: number;            // sell at the bid as soon as it falls to this price or under (a stop-loss)
 }
 const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_fair_v1', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15, exitAbove: 0.03, tauMin: 75 },
@@ -217,9 +218,13 @@ const CRYPTO_STRATEGIES: CryptoStrategy[] = [
 // (176-3 there, 53-0 on 15-minute and hourly), so a copy that skips 5-minute windows runs next to it. Thin
 // evidence (three losses), which is why it's a separate test and the original keeps running unchanged.
 CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === 'crypto_fav_99_1m')!, id: 'crypto_fav_99_1m_long', series: ['15m', '1h'] });
+// Nov 25, Aaron: the same 1-minute favorite with a stop-loss. If the 98c side's bid falls to 90c it sells at the
+// bid right away, so a loss costs about 8-10% of the bet instead of all of it. The catch it tests: with a minute
+// left the price can jump past 90c in one move, so the sale lands at whatever the bid is when the bot sees it.
+CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === 'crypto_fav_99_1m')!, id: 'crypto_fav_99_1m_stop', stopAt: 0.9 });
 export const BIG_BANKS: [string, number][] = [['1k', 1000], ['5k', 5000], ['10k', 10000]];
 for (const [k, bank] of BIG_BANKS) {
-  for (const id of ['crypto_fav_99_1m', 'crypto_fav_98_calm', 'crypto_fav_98_1h', 'crypto_fav_99_1m_long']) {
+  for (const id of ['crypto_fav_99_1m', 'crypto_fav_98_calm', 'crypto_fav_98_1h', 'crypto_fav_99_1m_long', 'crypto_fav_99_1m_stop']) {
     CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === id)!, id: `${id}_${k}`, bank });
   }
 }
@@ -1513,6 +1518,13 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       return;
     }
     const st = BY_ID.get(p.strategy);
+    // Stop-loss: sell into the bid the moment it is at or under the stop (taker fee charged). If the price
+    // gapped past the stop, the sale is at the lower bid, which is the honest fill.
+    if (st?.stopAt != null && p.mode === 'paper' && bidSide > 0 && bidSide <= st.stopAt) {
+      await closePosition(this.env.DB, p, { price: bidSide, coef: COEF, maker: false, reason: `stop-loss: bid ${cents(bidSide)} at or under ${cents(st.stopAt)}, ${leftText(tau)}`, now });
+      this.closed(p, now);
+      return;
+    }
     if (!st || st.exitAbove == null || fair == null || tau < (st.tauMax != null ? 8 : 20)) return;
     // Exits judge the bid against the blend too: sell early only when the bid, after its fee, beats what
     // the bot believes holding is worth. Otherwise it rides to the result, which costs no fee.
