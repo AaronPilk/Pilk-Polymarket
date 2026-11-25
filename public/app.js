@@ -553,6 +553,9 @@ const STRATEGY_LABEL = {
   crypto_fav_99_1m_stop_10k: 'Bitcoin · 98–99¢ favorite, 1 min left, sell if it drops to 90¢ ($10,000)',
   crypto_fav_99_1m_long_1k: 'Bitcoin · 98–99¢ favorite, 1 min left, 15-min and hourly only ($1,000)',
   hoops_value_noadd_1k: 'Basketball · model value, no adds ($1,000)',
+  crypto_fav_98_calm_lock_1k: 'Bitcoin · 98–99¢ favorite, 3 min left, steady price ($1,000, banks half of each high)',
+  crypto_fav_99_1m_long_lock_1k: 'Bitcoin · 98–99¢ favorite, 1 min left, 15-min and hourly only ($1,000, banks half of each high)',
+  hoops_value_noadd_lock_1k: 'Basketball · model value, no adds ($1,000, banks half of each high)',
   crypto_fav_99_1m_long_5k: 'Bitcoin · 98–99¢ favorite, 1 min left, 15-min and hourly only ($5,000)',
   hoops_value_noadd_5k: 'Basketball · model value, no adds ($5,000)',
   crypto_fav_99_1m_long_10k: 'Bitcoin · 98–99¢ favorite, 1 min left, 15-min and hourly only ($10,000)',
@@ -591,8 +594,8 @@ const botGroups = (b) => (b?.book === 'sports' ? ['hoops'] : [...(b?.live ? ['li
 // only the $100 accounts of strategies still running (retired ones are listed apart, never mixed in).
 // A bigger copy's own strategy: crypto_fav_99_1m_10k -> crypto_fav_99_1m; model value's copies drop the _v1
 // (hoops_value_1k -> hoops_value_v1).
-const baseOf = (id) => { const b = String(id || '').replace(/_(1k|5k|10k)$/, ''); return STRATEGY_LABEL[b] ? b : STRATEGY_LABEL[`${b}_v1`] ? `${b}_v1` : b; };
-const copyOf = (id, k) => Object.keys(STRATEGY_LABEL).find((x) => x.endsWith(`_${k}`) && baseOf(x) === id) || null;
+const baseOf = (id) => { const b = String(id || '').replace(/(_lock)?_(1k|5k|10k)$/, ''); return STRATEGY_LABEL[b] ? b : STRATEGY_LABEL[`${b}_v1`] ? `${b}_v1` : b; };
+const copyOf = (id, k, lock = false) => Object.keys(STRATEGY_LABEL).find((x) => x.endsWith(`_${k}`) && x.includes('_lock_') === lock && baseOf(x) === id) || null;
 const statusOfId = (b, id) => b?.lab?.strategies?.[id]?.status || 'testing';
 const activeBase = (b, group) => Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === group && statusOfId(b, id) !== 'retired');
 const retiredBase = (b, group) => Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === group && statusOfId(b, id) === 'retired');
@@ -830,7 +833,8 @@ function paintStratGrid() {
   // One card per strategy: its $100 account on top (the chart), then the bigger copies of it, if any.
   const cards = Object.keys(STRATEGY_LABEL).filter((id) => groupOf(id) === group).map((id) => ({
     base: acct(id),
-    sizes: SIZES.map(([k]) => { const cid = copyOf(id, k); return cid ? { ...acct(cid), label: `$${k.toUpperCase()}` } : null; }).filter(Boolean),
+    sizes: SIZES.flatMap(([k]) => [[copyOf(id, k), `$${k.toUpperCase()}`], [copyOf(id, k, true), `$${k.toUpperCase()}, banks half`]])
+      .map(([cid, label]) => (cid ? { ...acct(cid), label } : null)).filter(Boolean),
   }));
   const running = cards.filter((x) => x.base.status !== 'retired'), retired = cards.filter((x) => x.base.status === 'retired');
   const order = (xs) => xs.sort((a, z) => (z.base.any ? 1 : 0) - (a.base.any ? 1 : 0) || z.base.total - a.base.total);

@@ -177,6 +177,7 @@ interface CryptoStrategy {
   calm?: number;              // only while the window's mid has moved this much or less over the last 30 s
   bank?: number;              // paper only: this account starts with this much instead of BOT_ALLOCATION
   stopAt?: number;            // sell at the bid as soon as it falls to this price or under (a stop-loss)
+  lock?: number;              // paper only: share of every new high set aside for good (profit lock)
 }
 const CRYPTO_STRATEGIES: CryptoStrategy[] = [
   { id: 'crypto_fair_v1', minEdge: 0.05, priceMin: 0.05, priceMax: 0.9, tpBelow: 0.15, exitAbove: 0.03, tauMin: 75 },
@@ -227,6 +228,11 @@ for (const [k, bank] of BIG_BANKS) {
   for (const id of ['crypto_fav_99_1m', 'crypto_fav_98_calm', 'crypto_fav_98_1h', 'crypto_fav_99_1m_long', 'crypto_fav_99_1m_stop']) {
     CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === id)!, id: `${id}_${k}`, bank });
   }
+}
+// Nov 25, Aaron: profit lock. $1,000 copies of the two unbeaten favorites that set aside half of every new high
+// (see bankroll's `lock`), run next to the plain $1,000 copies so the two lines can be compared directly.
+for (const id of ['crypto_fav_98_calm', 'crypto_fav_99_1m_long']) {
+  CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === id)!, id: `${id}_lock_1k`, bank: 1000, lock: 0.5 });
 }
 const BY_ID = new Map(CRYPTO_STRATEGIES.map((s) => [s.id, s]));
 export const CRYPTO_IDS = [...CRYPTO_STRATEGIES.map((s) => s.id), 'crypto_ladder_v1'];
@@ -1625,7 +1631,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     if (c && now - c.at < 15_000) return c.bank;
     const bank = strategy === 'live'
       ? await bankroll(this.env.DB, this.allocation(), now, undefined, 'live')
-      : await bankroll(this.env.DB, BY_ID.get(strategy)?.bank ?? this.allocation(), now, strategy);
+      : await bankroll(this.env.DB, BY_ID.get(strategy)?.bank ?? this.allocation(), now, strategy, 'paper', BY_ID.get(strategy)?.lock ?? 0);
     this.bankCache.set(strategy, { at: now, bank });
     return bank;
   }

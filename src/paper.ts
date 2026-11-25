@@ -14,7 +14,7 @@ export interface Position {
   adds: number; take_profit: number | null; meta?: string | null; mode?: string; pnl?: number | null;
 }
 
-export interface Bankroll { allocation: number; realized: number; openNet: number; equity: number; available: number; today: number; openGames: number; peak: number }
+export interface Bankroll { allocation: number; realized: number; openNet: number; equity: number; available: number; today: number; openGames: number; peak: number; banked?: number }
 
 const id = (prefix: string, now: number) => `${prefix}-${now.toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 const r2 = (x: number) => Math.round(x * 100) / 100;
@@ -31,7 +31,11 @@ export function startOfDayET(now: number): number {
 
 // Each paper strategy runs its own account of `allocation` dollars, so results compare cleanly. The
 // live account (mode 'live') is one account across whatever strategy trades it.
-export async function bankroll(db: D1Database, allocation: number, now: number, strategy?: string, mode: 'paper' | 'live' = 'paper'): Promise<Bankroll> {
+// Nov 25, Aaron ("when it gets up, put the money to the side so it keeps growing"): `lock` is the share of
+// every new high above the starting money that gets set aside for good. The set-aside part never comes back
+// into play, so equity, peak and available below are only the money still at risk; a bad stretch can give
+// back at most what wasn't banked. Paper test accounts only.
+export async function bankroll(db: D1Database, allocation: number, now: number, strategy?: string, mode: 'paper' | 'live' = 'paper', lock = 0): Promise<Bankroll> {
   const row = await db.prepare(`SELECT
       COALESCE(SUM(CASE WHEN status != 'open' THEN pnl END), 0) AS realized,
       COALESCE(SUM(CASE WHEN status = 'open' THEN cost - proceeds END), 0) AS open_net,
@@ -44,10 +48,12 @@ export async function bankroll(db: D1Database, allocation: number, now: number, 
       WHERE mode = ?2 AND (?1 IS NULL OR strategy = ?1) AND status != 'open' AND pnl IS NOT NULL)`).bind(strategy ?? null, mode).first<any>();
   const realized = row?.realized || 0, openNet = row?.open_net || 0;
   const equity = allocation + realized;
+  const peak = Math.max(equity, allocation + Math.max(0, hw?.best || 0));
+  const banked = mode === 'paper' && lock > 0 ? r2(lock * Math.max(0, peak - allocation)) : 0;
   return {
-    allocation, realized, openNet, equity, today: row?.today || 0, openGames: row?.open_games || 0,
-    available: Math.max(0, allocation + realized - openNet),
-    peak: Math.max(equity, allocation + Math.max(0, hw?.best || 0)),
+    allocation, realized, openNet, equity: equity - banked, today: row?.today || 0, openGames: row?.open_games || 0,
+    available: Math.max(0, allocation + realized - openNet - banked),
+    peak: peak - banked, banked,
   };
 }
 
