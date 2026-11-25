@@ -14,7 +14,7 @@
 //             block made money and at least two of the three did, so it isn't fading
 //   drawdown  the account never fell more than 20% from its high along the way
 
-export interface ReadyRow { pnl: number | null; cost: number | null; group?: string | number | null }
+export interface ReadyRow { pnl: number | null; cost: number | null; group?: string | number | null; real?: number | null }
 export interface ReadyModel {
   windows?: number; modelLoss?: number | null; marketLoss?: number | null;
   edge?: { mean: number | null; t: number | null; hours?: number; windows?: number } | null;

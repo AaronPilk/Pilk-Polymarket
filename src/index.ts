@@ -163,11 +163,11 @@ async function state(env: Env) {
 async function researchBoards(env: Env) {
   for (const book of ['btc', 'sports'] as const) {
     const { results } = await env.DB.prepare(AT_SIZE_SQL)
-      .bind(BOOKS[book], RULES).all<{ strategy: string; pnl: number | null; cost: number | null; hr: number; game: string }>();
+      .bind(BOOKS[book], RULES).all<{ strategy: string; pnl: number | null; cost: number | null; hr: number; game: string; real: number | null }>();
     const by = new Map<string, ReadyRow[]>();
     for (const r of results) {
       const a = by.get(r.strategy) || [];
-      a.push({ pnl: r.pnl, cost: r.cost, group: book === 'btc' ? r.hr : r.game });
+      a.push({ pnl: r.pnl, cost: r.cost, group: book === 'btc' ? r.hr : r.game, real: r.real });
       by.set(r.strategy, a);
     }
     // The quick score (research.ts): bitcoin only, from the bot's 30-second marks. A failure here

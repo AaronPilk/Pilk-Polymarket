@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RETIRED, board, judge, statusOf, AT_SIZE_SQL, QUICK_SQL, quickScore } from '../src/research.ts';
+import { parentOf, RETIRED, board, judge, statusOf, AT_SIZE_SQL, QUICK_SQL, quickScore } from '../src/research.ts';
 import { readFileSync } from 'node:fs';
 
 // rows: one bet per row, $1 each, spread over `groups` hours (or games)
@@ -24,9 +24,9 @@ test('research board: losing beyond luck retires; a clear winner is promising, t
   assert.ok(noisy.t! >= 1 && noisy.t! < 1.64, `t ${noisy.t}`);
   assert.equal(noisy.status, 'testing');
   assert.match(noisy.reason, /No clear answer/);
-  // ahead even in its worst case (mean - 1.64 SE above zero): promising, normal size
-  const ahead = judge('crypto_test_v1', rows(40, 8, (i) => [0.62, -0.08, 0.52, 0.02, 0.57, -0.13, 0.47, -0.03][i % 8]), 'btc');
-  assert.ok(ahead.t! >= 1.64, `t ${ahead.t}`);
+  // ahead even in its worst case (Nov 25: mean - 2.0 SE above zero): promising, normal size
+  const ahead = judge('crypto_test_v1', rows(40, 8, (i) => [0.72, 0.02, 0.62, 0.12, 0.67, -0.03, 0.57, 0.07][i % 8]), 'btc');
+  assert.ok(ahead.t! >= 2, `t ${ahead.t}`);
   assert.equal(ahead.status, 'promising');
   assert.match(ahead.reason, /worst case \+/);
   // ahead clearly, but under 200 bets: still promising, not proven
@@ -51,7 +51,9 @@ test('research board: losing beyond luck retires; a clear winner is promising, t
 
 test('research board: ideas the evidence contradicts stay retired; top 3 ranks proven, then promising by worst case', () => {
   assert.ok(RETIRED.crypto_fade_v1 && RETIRED.crypto_late_v1);
-  assert.equal(judge('crypto_fade_v1', rows(60, 10, () => 0.5), 'btc').status, 'retired');
+  assert.equal(judge('crypto_fade_v1', rows(60, 10, () => -0.1), 'btc').status, 'retired');
+  // Nov 25: a replay-retired idea that is up live goes back to testing (paper bets cost nothing)
+  assert.equal(judge('crypto_fade_v1', rows(60, 10, () => 0.5), 'btc').status, 'testing');
   const by = new Map([
     ['a', rows(220, 20, (i) => 0.05 + ((i % 20) - 9.5) * 0.004)],   // proven, small edge
     ['b', rows(60, 10, (i) => 0.4 + ((i % 10) - 4.5) * 0.02)],     // promising, big edge
@@ -68,10 +70,21 @@ test('research board: ideas the evidence contradicts stay retired; top 3 ranks p
   // Nov 23: price vs math and its cheap-side cousin retired on a 30-day replay, whatever their live record says
   for (const id of ['crypto_fair_v1', 'crypto_hold_v1', 'crypto_cheap_v1']) {
     assert.match(RETIRED[id], /Replayed on 30 days|replayed bets/);
-    assert.equal(judge(id, rows(130, 20, (i) => (i % 3 ? -0.3 : 0.9)), 'btc').status, 'retired');
+    assert.equal(judge(id, rows(130, 20, (i) => (i % 3 ? -0.3 : 0.5)), 'btc').status, 'retired');
     assert.equal(statusOf(null, id), 'retired');
   }
   assert.equal(statusOf(null, 'crypto_fair_strict'), 'testing');   // the 10¢+ cut wasn't a loser: still testing
+  // Nov 25: bigger copies share their $100 version's verdict, and nothing up is ever retired
+  assert.equal(parentOf('crypto_fav_98_lock_1k'), 'crypto_fav_98');
+  assert.equal(parentOf('hoops_value_10k'), 'hoops_value_v1');
+  assert.equal(parentOf('crypto_fav_98'), null);
+  const fam = board(new Map([['x_v1', rows(40, 8, (i) => (i % 2 ? -0.6 : -0.2))], ['x_v1_10k', rows(40, 8, () => 0.3)]]), ['x_v1', 'x_v1_10k', 'x_v1_5k'], 'btc', 1);
+  assert.equal(fam.strategies.x_v1.status, 'retired');
+  assert.equal(fam.strategies.x_v1_10k.status, 'retired');
+  assert.equal(fam.strategies.x_v1_5k.status, 'retired');
+  assert.equal(statusOf({ strategies: { y_v1: { status: 'promising' } } }, 'y_v1_lock_1k'), 'promising');
+  const upButBad = judge('crypto_test_v1', [...rows(40, 8, () => -0.5), { pnl: -0.5, cost: 1, group: 1, real: 25 }], 'btc');
+  assert.notEqual(upButBad.status, 'retired');
 });
 
 test('research board: bets are judged on fees at full size, not the cent-rounded fee', async () => {

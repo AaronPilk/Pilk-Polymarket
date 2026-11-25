@@ -25,7 +25,12 @@ export const LAB: Record<Book, { judge: number; groups: number; proven: number }
   btc: { judge: 30, groups: 6, proven: 200 },       // groups: hours
   sports: { judge: 30, groups: 8, proven: 100 },    // groups: games
 };
-const Z = 1.64;   // best case = mean + 1.64 standard errors, worst case = mean - 1.64 (95% one-sided)
+// (The old single 1.64 bar, Z, was split into Z_RETIRE and Z_UP below.)
+// Nov 25, 10-day test (research_notes/ten_day_test_rules.md): the board looks every 5 minutes, and a 1.64 bar
+// checked that often retires a break-even strategy about 17% of the time over 10 days and promotes 17% of
+// no-edge ones on a streak. So retiring needs the best case below zero at 2.33 standard errors and moving up
+// needs the worst case above zero at 2.0 (one more full loss still counted).
+const Z_RETIRE = 2.33, Z_UP = 2.0;
 // "Nothing to show" also needs this many of the strategy's rarer result: losses for a favorite that
 // rarely loses, wins for a longshot that rarely wins. A 98¢ favorite loses about twice in 100 bets, so
 // 90 bets hold two or three losses and one more or fewer flips its t: that's a coin toss, not a
@@ -63,7 +68,7 @@ export const RETIRED: Record<string, string> = {
 // fills pay nothing either way. Binds: strategy LIKE pattern, RULES.
 const EXACT = `${TAKER_COEF} * o.filled_qty * COALESCE(o.avg_fill, o.price) * (1 - COALESCE(o.avg_fill, o.price))`;
 const TAKER = `o.order_type IN ('market', 'ioc')`;
-export const AT_SIZE_SQL = `SELECT p.strategy, p.closed_at / 3600000 AS hr, p.market_slug AS game,
+export const AT_SIZE_SQL = `SELECT p.strategy, p.closed_at / 3600000 AS hr, p.market_slug AS game, p.pnl AS real,
     p.pnl + p.fees - COALESCE(SUM(CASE WHEN ${TAKER} THEN ${EXACT} END), 0) AS pnl,
     p.cost - COALESCE(SUM(CASE WHEN o.action = 'buy' THEN o.fee END), 0)
       + COALESCE(SUM(CASE WHEN o.action = 'buy' AND ${TAKER} THEN ${EXACT} END), 0) AS cost
@@ -118,31 +123,44 @@ export function judge(id: string, rows: ReadyRow[], book: Book): Verdict {
     mean: r4(s.mean), se: r4(s.se), t: s.t == null ? null : Math.round(s.t * 100) / 100,
     low: g.mean != null && g.se != null ? r4(g.mean - g.se) : null,
   };
-  if (RETIRED[id]) return { ...base, status: 'retired', reason: RETIRED[id] };
+  // Nov 25, Aaron: "why would we retire a strategy that is literally making money?" A strategy whose real
+  // P&L on the current rules is above zero is never retired, whatever else says so: paper bets cost nothing,
+  // so the only reason to stop one is that it's behind. The replay verdicts below still hold for an idea
+  // that hasn't earned anything live.
+  const real = rows.reduce((a, r) => a + (r.real ?? r.pnl ?? 0), 0), up = real > 0.004;
+  if (RETIRED[id] && !up) return { ...base, status: 'retired', reason: RETIRED[id] };
   const lab = LAB[book], unit = book === 'btc' ? 'hours' : 'games';
   if (s.n < lab.judge || s.groups < lab.groups || s.mean == null || s.se == null || !(s.se > 0)) {
     const more = s.n < lab.judge ? `${s.n} of ${lab.judge} bets on the new rules` : s.groups < lab.groups ? `${s.groups} of ${lab.groups} ${unit} so far` : 'no spread in its results yet';
-    return { ...base, status: 'testing', reason: `Testing at ${TIERED.has(id) ? 'its price-tier size (5-10% of its account)' : '3% of its account'} a bet: ${more}.` };
+    return { ...base, status: 'testing', reason: `Testing at ${TIERED.has(parentOf(id) ?? id) ? 'its price-tier size (5-10% of its account)' : '3% of its account'} a bet: ${more}.` };
   }
   const t = s.mean / s.se, line = `${pct(s.mean)} a dollar over ${s.n} bets`;
-  if (s.mean + Z * s.se < 0) {
-    return { ...base, status: 'retired', reason: `Losing beyond luck: ${line}, best case ${pct(s.mean + Z * s.se)}.` };
+  if (!up && s.mean + Z_RETIRE * s.se < 0) {
+    return { ...base, status: 'retired', reason: `Losing beyond luck: ${line}, best case ${pct(s.mean + Z_RETIRE * s.se)}.` };
   }
   const { wins, losses } = outcomes(rows), rare = Math.min(wins, losses);
   const stale = s.n >= lab.judge * 3 && t < 0.5;
   // Nov 25, Aaron ("why would we retire a strategy that is literally making money?"): paper bets cost nothing
   // real, so "nothing to show" only retires a strategy that is also behind. One that's ahead but not yet beyond
   // luck keeps testing. Losing beyond luck still retires anything at any time.
-  if (stale && rare >= RARE && s.mean <= 0) {
+  if (!up && stale && rare >= RARE && s.mean <= 0) {
     return { ...base, status: 'retired', reason: `Nothing to show after ${s.n} bets: ${pct(s.mean)} a dollar (t ${t.toFixed(1)}). Fees for no edge.` };
   }
   const gt = g.mean != null && g.se != null && g.se > 0 ? g.mean / g.se : null;
   if (s.n >= lab.proven && gt != null && gt >= 2 && s.pnl > 0) return { ...base, status: 'proven', reason: `Ahead beyond luck: ${line} (t ${gt.toFixed(1)} with one more full loss counted).` };
-  if (g.mean != null && g.se != null && g.mean - Z * g.se > 0 && s.pnl > 0) return { ...base, status: 'promising', reason: `Ahead even in its worst case: ${line}, worst case ${pct(g.mean - Z * g.se)} even after one more full loss. Bets its normal size.` };
+  if (g.mean != null && g.se != null && g.mean - Z_UP * g.se > 0 && s.pnl > 0) return { ...base, status: 'promising', reason: `Ahead even in its worst case: ${line}, worst case ${pct(g.mean - Z_UP * g.se)} even after one more full loss. Bets its normal size.` };
   const lose = losses <= wins;
   const few = lose ? (rare === 1 ? 'loss' : 'losses') : (rare === 1 ? 'win' : 'wins');
   const wait = stale ? ` Only ${rare} ${few} so far: a bet that rarely ${lose ? 'loses' : 'wins'} needs ${RARE} before the board can call it.` : '';
-  return { ...base, status: 'testing', reason: `No clear answer yet: ${line} (t ${t.toFixed(1)}).${wait} Still testing at ${TIERED.has(id) ? 'its price-tier size' : '3% a bet'}.` };
+  return { ...base, status: 'testing', reason: `No clear answer yet: ${line} (t ${t.toFixed(1)}).${wait} Still testing at ${TIERED.has(parentOf(id) ?? id) ? 'its price-tier size' : '3% a bet'}.` };
+}
+
+// The $100 account a bigger copy belongs to: crypto_fav_98_10k and crypto_fav_98_lock_1k -> crypto_fav_98.
+// Model value's copies predate the rule and drop its _v1 (hoops_value_5k -> hoops_value_v1).
+export function parentOf(id: string): string | null {
+  const m = id.match(/^(.*?)(?:_lock)?_(?:1k|5k|10k)$/);
+  if (!m) return null;
+  return m[1] === 'hoops_value' ? 'hoops_value_v1' : m[1];
 }
 
 export function board(rowsBy: Map<string, ReadyRow[]>, ids: string[], book: Book, now = Date.now(), quickBy?: Map<string, Quick>) {
@@ -151,6 +169,12 @@ export function board(rowsBy: Map<string, ReadyRow[]>, ids: string[], book: Book
     strategies[id] = judge(id, rowsBy.get(id) || [], book);
     const q = quickBy?.get(id);
     if (q) strategies[id].quick = q;
+  }
+  // Nov 25, Aaron: a strategy and its bigger copies are one test with one verdict, judged on the $100 account.
+  // The copies keep their own numbers but bet, stop and size up together with it.
+  for (const [id, v] of Object.entries(strategies)) {
+    const p = parentOf(id), pv = p ? strategies[p] : null;
+    if (pv && !parentOf(p!)) strategies[id] = { ...v, status: pv.status, reason: `Same verdict as its $100 version: ${pv.reason}` };
   }
   const rank = (v: Verdict) => (v.status === 'proven' ? 1 : 0) * 10 + (v.low ?? -1);
   const top = Object.entries(strategies)
@@ -162,6 +186,6 @@ export function board(rowsBy: Map<string, ReadyRow[]>, ids: string[], book: Book
 
 // What a strategy may do with its verdict (missing = testing; a retired idea stays retired).
 export function statusOf(lab: { strategies?: Record<string, { status?: Status }> } | null | undefined, id: string): Status {
-  if (RETIRED[id]) return 'retired';
-  return lab?.strategies?.[id]?.status ?? 'testing';
+  const own = lab?.strategies?.[id]?.status ?? (parentOf(id) ? lab?.strategies?.[parentOf(id)!]?.status : undefined);
+  return own ?? (RETIRED[id] ? 'retired' : 'testing');
 }

@@ -565,6 +565,15 @@ const STRATEGY_LABEL = {
   crypto_fav_99_1m_long_10k: 'Bitcoin · 98–99¢ favorite, 1 min left, 15-min and hourly only ($10,000)',
   hoops_value_noadd_10k: 'Basketball · model value, no adds ($10,000)',
 };
+// Nov 25: every strategy has four bigger copies (src/crypto.ts COPIES, src/live.ts): name any that has no
+// hand-written label after its $100 version. Model value's copies are hoops_value_*, not hoops_value_v1_*.
+for (const base of Object.keys(STRATEGY_LABEL).filter((id) => !/_(1k|5k|10k)$/.test(id))) {
+  const stem = base === 'hoops_value_v1' ? 'hoops_value' : base;
+  for (const [suf, tag] of [['1k', '$1,000'], ['lock_1k', '$1,000, banks half of each high'], ['5k', '$5,000'], ['10k', '$10,000']]) {
+    if (!STRATEGY_LABEL[`${stem}_${suf}`]) STRATEGY_LABEL[`${stem}_${suf}`] = `${STRATEGY_LABEL[base]} (${tag})`;
+  }
+}
+const TEST_START = Date.parse('2026-11-25T21:00:00Z'), TEST_END = Date.parse('2026-12-05T21:00:00Z');
 const variantOf = (id) => (STRATEGY_LABEL[id] || id || '').split(' · ')[1] || '';
 const bookOf = (s) => (s?.startsWith('crypto_') ? 'btc' : s?.startsWith('hoops_') ? 'sports' : 'other');
 // The big test accounts: the same rules as if the account started at $1,000, $5,000 or $10,000 (ids end _1k/_5k/_10k).
@@ -856,11 +865,14 @@ function paintStratGrid() {
       ${sizes.length ? `<div class="sc-sizes"><div class="sc-sizes-h">Same rules, bigger accounts</div>${sizes.map((z) => row(z, z.label)).join('')}</div>` : ''}
     </button>`;
   };
-  $('#bot-grid-sub').textContent = 'tap one to chart it';
+  // Nov 25: the 10-day test. Every strategy runs a $100 account plus $1K, $1K banking half of each high, $5K and
+  // $10K copies; rules stay locked until it ends.
+  const day = Math.min(10, Math.max(1, Math.floor((Date.now() - TEST_START) / 86400000) + 1));
+  $('#bot-grid-sub').textContent = Date.now() < TEST_END ? `10-day test · day ${day} of 10` : 'tap one to chart it';
   el.innerHTML = `<div class="strat-grid">${order(running).map(card).join('')}</div>
     ${retired.length ? `<button class="more" data-retired-toggle>${store.showRetired ? 'Hide' : 'Show'} ${retired.length} retired</button>
     ${store.showRetired ? `<div class="strat-grid">${order(retired).map(card).join('')}</div>` : ''}` : ''}
-    <div class="row-sub wrap pad">The big number on each card is the strategy's $100 test account. Under it, the same strategy copied onto bigger accounts, each with its own money. A copy marked retired lost money beyond luck and has stopped betting. The headline at the top adds up only the $100 accounts of strategies still running. Tap a card or a row to chart it alone.</div>`;
+    <div class="row-sub wrap pad">The big number on each card is the strategy's $100 test account. Under it, the same strategy copied onto bigger accounts, each with its own money. A copy marked retired lost money beyond luck and has stopped betting. The headline at the top adds up only the $100 accounts of strategies still running. Tap a card or a row to chart it alone. Rules are locked for the 10-day test (ends Dec 5, 4 PM): a strategy only stops early if it's behind beyond luck, and nothing that's up is ever retired.</div>`;
 }
 
 const botTime = (t) => (store.botRange === '1h' || store.botRange === '1d'

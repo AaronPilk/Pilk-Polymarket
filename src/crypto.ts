@@ -59,7 +59,7 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import { DEFAULT_BLEND, SCORE_POINTS, bandOf, blendProb, eventFor, fairUp, gradeModel, judgingBlend, learnOffset, parseWindow, windowEnd, windowSlug, type Band, type Blend, type Mark } from './cryptomath';
-import { RULES, statusOf, type Status, AT_SIZE_SQL } from './research';
+import { RULES, statusOf, parentOf, type Status, AT_SIZE_SQL } from './research';
 import { dailyStopHit, drawdownScale, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
 import { BOOK_FRESH, Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
 import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
@@ -224,15 +224,18 @@ CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === 'crypto_fav_9
 // left the price can jump past 90c in one move, so the sale lands at whatever the bid is when the bot sees it.
 CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === 'crypto_fav_99_1m')!, id: 'crypto_fav_99_1m_stop', stopAt: 0.9 });
 export const BIG_BANKS: [string, number][] = [['1k', 1000], ['5k', 5000], ['10k', 10000]];
-for (const [k, bank] of BIG_BANKS) {
-  for (const id of ['crypto_fav_99_1m', 'crypto_fav_98_calm', 'crypto_fav_98_1h', 'crypto_fav_99_1m_long', 'crypto_fav_99_1m_stop', 'crypto_fav_98']) {
-    CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === id)!, id: `${id}_${k}`, bank });
+// Nov 25, Aaron ("why are we not testing the 1K banks half, 5K and 10K on every strategy?"): every strategy
+// runs four bigger copies next to its $100 account, fed the same signals: $1,000, $1,000 that sets aside half
+// of every new high (bankroll's `lock`), $5,000 and $10,000. A copy bets, stops and sizes up on its $100
+// version's verdict (research.ts board), so one card is one test. Locked for the 10-day test (TEST_PLAN).
+export const COPIES: { suffix: string; bank: number; lock?: number }[] = [
+  { suffix: '1k', bank: 1000 }, { suffix: 'lock_1k', bank: 1000, lock: 0.5 }, { suffix: '5k', bank: 5000 }, { suffix: '10k', bank: 10000 },
+];
+for (const base of CRYPTO_STRATEGIES.slice()) {
+  for (const c of COPIES) {
+    const id = `${base.id}_${c.suffix}`;
+    if (!CRYPTO_STRATEGIES.some((s) => s.id === id)) CRYPTO_STRATEGIES.push({ ...base, id, bank: c.bank, lock: c.lock });
   }
-}
-// Nov 25, Aaron: profit lock. $1,000 copies of the two unbeaten favorites that set aside half of every new high
-// (see bankroll's `lock`), run next to the plain $1,000 copies so the two lines can be compared directly.
-for (const id of ['crypto_fav_98_calm', 'crypto_fav_99_1m_long', 'crypto_fav_98']) {
-  CRYPTO_STRATEGIES.push({ ...CRYPTO_STRATEGIES.find((s) => s.id === id)!, id: `${id}_lock_1k`, bank: 1000, lock: 0.5 });
 }
 const BY_ID = new Map(CRYPTO_STRATEGIES.map((s) => [s.id, s]));
 export const CRYPTO_IDS = [...CRYPTO_STRATEGIES.map((s) => s.id), 'crypto_ladder_v1'];
@@ -1363,7 +1366,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
         if (!dailyStopHit(bank.equity, bank.today, bank.peak)) {
           const stake = stakeFor({
             fair: st.fav ? best.ask : this.sizingProb(best, mid, tau), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
-            fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(), recordKelly: this.records.get(st.id)?.f ?? 0,
+            fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(), recordKelly: this.records.get(parentOf(st.id) ?? st.id)?.f ?? 0,
           });
           // A test bet is TEST_SHARE of the account (fairvalue.ts); a promising or proven strategy bets
           // its own size, never less than a test bet. Both stay inside the ladder and the book.
@@ -1381,7 +1384,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
               strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side,
               sideName: `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`, ask: best.ask, qty, coef: COEF,
               reason: `${probe ? 'probe: ' : ''}${st.fav ? `favorite at ${cents(best.ask)}` : `fair ${cents(best.fair)} vs ask ${cents(best.ask)}`}, ${leftText(tau)}${src === 'stream' ? ', on stream' : ''}`, now, tpBelow: st.tpBelow,
-              meta: { fair: r4(best.fair), edge: r4(best.edge), mid: midSide == null ? null : r4(midSide), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), record: this.records.get(st.id)?.f ?? 0, probe, feeds: this.feedsNow(now), src, equity: r2(bank.equity), rules: RULES, status, gate: fitOk ? 'fit' : 'start' },
+              meta: { fair: r4(best.fair), edge: r4(best.edge), mid: midSide == null ? null : r4(midSide), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), record: this.records.get(parentOf(st.id) ?? st.id)?.f ?? 0, probe, feeds: this.feedsNow(now), src, equity: r2(bank.equity), rules: RULES, status, gate: fitOk ? 'fit' : 'start' },
             });
             pos.mode = 'paper';
             this.open.push(pos);
@@ -1402,7 +1405,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     if (dailyStopHit(bank.equity, bank.today, bank.peak)) return;
     const stake = stakeFor({
       fair: this.sizingProb(best, mid, tau), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
-      fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(), recordKelly: this.records.get(st.id)?.f ?? 0,
+      fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(), recordKelly: this.records.get(parentOf(st.id) ?? st.id)?.f ?? 0,
     });
     const qty = Math.floor(stake / best.ask);
     if (qty < 1) return;   // real money: no probes

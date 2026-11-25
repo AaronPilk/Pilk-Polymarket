@@ -163,12 +163,16 @@ const HOOPS_STRATEGIES: HoopsStrategy[] = [
 // Nov 25, Aaron ("test them all"): model value with no adds. Overnight its Colorado bet grew from about 3% to
 // 4-8% of the account by adding as the price fell, and lost. This copy buys once and never adds.
 HOOPS_STRATEGIES.push({ ...HOOPS_STRATEGIES.find((s) => s.id === 'hoops_value_v1')!, id: 'hoops_value_noadd', maxAdds: 0 });
-for (const [k, bank] of [['1k', 1000], ['5k', 5000], ['10k', 10000]] as const) {
-  HOOPS_STRATEGIES.push({ ...HOOPS_STRATEGIES.find((s) => s.id === 'hoops_value_v1')!, id: `hoops_value_${k}`, bank });
-  HOOPS_STRATEGIES.push({ ...HOOPS_STRATEGIES.find((s) => s.id === 'hoops_value_noadd')!, id: `hoops_value_noadd_${k}`, bank });
+// Nov 25, Aaron: every strategy gets the same four bigger copies as the Bitcoin bot ($1,000, $1,000 banking
+// half of each new high, $5,000, $10,000), betting on its $100 version's verdict. Model value's copies keep
+// their older names (hoops_value_1k, not hoops_value_v1_1k) so their records carry on.
+for (const base of HOOPS_STRATEGIES.slice()) {
+  const stem = base.id === 'hoops_value_v1' ? 'hoops_value' : base.id;
+  for (const c of [{ suffix: '1k', bank: 1000 }, { suffix: 'lock_1k', bank: 1000, lock: 0.5 }, { suffix: '5k', bank: 5000 }, { suffix: '10k', bank: 10000 }]) {
+    const id = `${stem}_${c.suffix}`;
+    if (!HOOPS_STRATEGIES.some((s) => s.id === id)) HOOPS_STRATEGIES.push({ ...base, id, bank: c.bank, lock: (c as any).lock });
+  }
 }
-// Nov 25, Aaron: profit lock, a $1,000 copy of model value (no adds) that sets aside half of every new high.
-HOOPS_STRATEGIES.push({ ...HOOPS_STRATEGIES.find((s) => s.id === 'hoops_value_noadd')!, id: 'hoops_value_noadd_lock_1k', bank: 1000, lock: 0.5 });
 export const HOOPS_IDS = HOOPS_STRATEGIES.map((s) => s.id);
 const MAX_EDGE = 0.12;          // a bigger "edge" is more likely our data being stale than a gift
 // Our scoreboard can lag the market, worst around the buzzer, when ESPN posts the last baskets
