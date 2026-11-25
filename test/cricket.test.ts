@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ballsOf, battingWinProb, cricketState, eventBetween, matchCricket } from '../src/cricketmath.ts';
+import { ballsOf, battingWinProb, chaseWinProb, cricketState, eventBetween, matchCricket } from '../src/cricketmath.ts';
 
 const ev = (o: any = {}) => ({
   id: '1557448', date: '2026-11-25T14:30Z',
@@ -26,11 +26,15 @@ test('cricket: ESPN scorepanel event -> state (innings, score, balls, target, fo
 
 test('cricket: win chance moves the right way and by sensible amounts', () => {
   const base = { format: 't20' as const, maxBalls: 120, innings: 2, target: 165 };
-  assert.ok(Math.abs(battingWinProb({ ...base, runs: 0, wickets: 0, balls: 0 })! - 0.5) < 0.02);
+  // the fitted chase model, checked against the research example: 17 off 11 balls, 5 in hand is about 68%
+  assert.ok(Math.abs(chaseWinProb('t20', 17, 11, 5, 120) - 0.68) < 0.05, `${chaseWinProb('t20', 17, 11, 5, 120)}`);
+  // a strong favourite chasing gets a lift from its pre-match price early, little of it late
+  const even = battingWinProb({ ...base, runs: 0, wickets: 0, balls: 0 })!, fav = battingWinProb({ ...base, runs: 0, wickets: 0, balls: 0 }, 0.75)!;
+  assert.ok(fav > even + 0.1, `${even} ${fav}`);
   const p = battingWinProb({ ...base, runs: 135, wickets: 5, balls: 108 })!;   // 30 off 12, 5 down
   const wicket = battingWinProb({ ...base, runs: 135, wickets: 6, balls: 109 })!;
   const six = battingWinProb({ ...base, runs: 141, wickets: 5, balls: 109 })!;
-  assert.ok(p > 0.1 && p < 0.35, `p ${p}`);
+  assert.ok(p > 0.05 && p < 0.3, `p ${p}`);
   assert.ok(wicket < p && six > p);
   assert.equal(battingWinProb({ ...base, runs: 165, wickets: 5, balls: 110 }), 1);
   assert.equal(battingWinProb({ ...base, runs: 150, wickets: 10, balls: 110 }), 0);

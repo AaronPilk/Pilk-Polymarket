@@ -505,6 +505,7 @@ const STRATEGY_LABEL = {
   cricket_lag_flip: 'Cricket · score lag, sell when the price catches up',
   cricket_lag_hold: 'Cricket · score lag, hold to the result',
   cricket_value: 'Cricket · model value in the chase',
+  cricket_wicket_bounce: 'Cricket · back the batting side after a wicket overreaction',
   crypto_fair_v1: 'Bitcoin · price vs math',
   crypto_fair_strict: 'Bitcoin · price vs math, strict',
   crypto_fair_max: 'Bitcoin · price vs math, bigger bets',

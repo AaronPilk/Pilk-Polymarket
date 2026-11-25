@@ -19,6 +19,12 @@
 //   cricket_lag_hold  The same entries, held to the result.
 //   cricket_value     Limited overs, second innings: the model's chance beats the ask by 8c after the fee,
 //                     spread 5c or less. One bet a match, held to the result.
+//   cricket_wicket_bounce  First innings: after a wicket, if the market marked the batting side down by more than
+//                     1.3x what the model says the wicket was worth, back the batting side and sell an over (six
+//                     balls) later or after 5 minutes. Betfair studies found first-innings wicket overreaction
+//                     (Norton, Gray & Faff 2015). research_notes/cricket_research.md.
+// The chase model is fitted on Cricsheet data and blended with the pre-match price (cricketmath.ts). Research
+// note (Nov 25): ESPN's feed runs behind TV, so the lag strategies test whether we're ever faster, not assume it.
 // The test plan and the rules for judging it: project doc claude/ten-day-test.md (the cricket book starts
 // its own 10 days when it goes live).
 
@@ -42,14 +48,15 @@ const FLIP_AFTER = 90_000;
 
 type Side = 'long' | 'short';
 interface CricketEnv { DB: D1Database; BOT_ALLOCATION?: string; BOT_MAX_BET?: string; CRICKET?: string }
-interface Mkt { slug: string; league: string; long_team: string | null; short_team: string | null; game_start: string; espn_id: string | null; fee_coef: number | null }
+interface Mkt { slug: string; league: string; long_team: string | null; short_team: string | null; game_start: string; espn_id: string | null; fee_coef: number | null; start_mid: number | null }
 interface Quote { bid: number | null; ask: number | null; mid: number | null }
 
-export interface CricketStrategy { id: string; kind: 'lag_flip' | 'lag_hold' | 'value'; bank?: number; lock?: number }
+export interface CricketStrategy { id: string; kind: 'lag_flip' | 'lag_hold' | 'value' | 'bounce'; bank?: number; lock?: number }
 const BASES: CricketStrategy[] = [
   { id: 'cricket_lag_flip', kind: 'lag_flip' },
   { id: 'cricket_lag_hold', kind: 'lag_hold' },
   { id: 'cricket_value', kind: 'value' },
+  { id: 'cricket_wicket_bounce', kind: 'bounce' },
 ];
 export const CRICKET_STRATEGIES: CricketStrategy[] = [...BASES];
 for (const b of BASES) {
@@ -75,6 +82,7 @@ export class CricketFeed extends DurableObject<CricketEnv> {
   private prevStates = new Map<string, CricketState>();
   private stateAt = new Map<string, number>();           // espn id -> when its state last changed
   private quotes = new Map<string, Quote>();
+  private preMid = new Map<string, number>();
   private lastMark = new Map<string, string>();
   private mids = new Map<string, Array<[number, number]>>();  // slug -> recent [ts, mid]
   private open: Position[] = [];
@@ -145,10 +153,10 @@ export class CricketFeed extends DurableObject<CricketEnv> {
 
   private async load(now: number) {
     const { results } = await this.env.DB.prepare(
-      "SELECT slug, league, long_team, short_team, game_start, espn_id, fee_coef FROM markets WHERE league LIKE 'cricket:%' AND result IS NULL AND game_start >= ? AND game_start <= ? ORDER BY game_start",
+      "SELECT slug, league, long_team, short_team, game_start, espn_id, fee_coef, start_mid FROM markets WHERE league LIKE 'cricket:%' AND result IS NULL AND game_start >= ? AND game_start <= ? ORDER BY game_start",
     ).bind(new Date(now - LIVE_FOR.multi).toISOString(), new Date(now + 24 * 60 * MIN).toISOString()).all<Mkt>();
-    const known = new Map(this.markets.map((m) => [m.slug, m.espn_id]));
-    this.markets = results.map((m) => ({ ...m, espn_id: m.espn_id || known.get(m.slug) || null }));
+    const known = new Map(this.markets.map((m) => [m.slug, m]));
+    this.markets = results.map((m) => ({ ...m, espn_id: m.espn_id || known.get(m.slug)?.espn_id || null, start_mid: m.start_mid ?? known.get(m.slug)?.start_mid ?? null }));
     this.loadedAt = now;
   }
 
@@ -189,7 +197,17 @@ export class CricketFeed extends DurableObject<CricketEnv> {
         if (!res.ok) continue;
         for (const m of (((await res.json()) as any).markets || []) as any[]) {
           const bid = num(m.bestBidQuote), ask = num(m.bestAskQuote);
-          this.quotes.set(m.slug, { bid, ask, mid: bid != null && ask != null ? (bid + ask) / 2 : null });
+          const mid = bid != null && ask != null ? (bid + ask) / 2 : null;
+          this.quotes.set(m.slug, { bid, ask, mid });
+          // The pre-match price (long side): the last mid before the start, kept on the market row once it starts.
+          const mk = chunk.find((x) => x.slug === m.slug);
+          if (mk && mid != null && ask! - bid! <= 0.1) {
+            if (Date.now() < Date.parse(mk.game_start)) this.preMid.set(mk.slug, mid);
+            else if (mk.start_mid == null && this.preMid.has(mk.slug)) {
+              mk.start_mid = this.preMid.get(mk.slug)!;
+              await this.env.DB.prepare('UPDATE markets SET start_mid = ? WHERE slug = ? AND start_mid IS NULL').bind(r4(mk.start_mid), mk.slug).run().catch(() => undefined);
+            }
+          }
         }
       } catch {}
     }
@@ -207,8 +225,11 @@ export class CricketFeed extends DurableObject<CricketEnv> {
 
   private longProb(m: Mkt, s: CricketState | undefined): number | null {
     if (!s || s.state !== 'in') return null;
-    const p = battingWinProb(s), lb = this.longBats(m, s);
-    return p == null || lb == null ? null : lb ? p : 1 - p;
+    const lb = this.longBats(m, s);
+    if (lb == null) return null;
+    const p0 = m.start_mid == null ? null : lb ? m.start_mid : 1 - m.start_mid;
+    const p = battingWinProb(s, p0);
+    return p == null ? null : lb ? p : 1 - p;
   }
 
   private record(games: Mkt[], now: number, stmts: D1PreparedStatement[]) {
@@ -275,9 +296,17 @@ export class CricketFeed extends DurableObject<CricketEnv> {
       // Exits for the flip strategy.
       for (const p of held) {
         const st = CRICKET_STRATEGIES.find((x) => x.id === p.strategy);
-        if (st?.kind !== 'lag_flip') continue;
+        if (st?.kind !== 'lag_flip' && st?.kind !== 'bounce') continue;
         const meta = (() => { try { return JSON.parse((p as any).meta || '{}'); } catch { return {}; } })();
         const v = view(p.side);
+        if (st.kind === 'bounce') {
+          const over = meta.balls0 != null && (s.innings !== meta.innings0 || s.balls >= meta.balls0 + 6);
+          if (over || now - p.opened_at >= 5 * MIN) {
+            await closePosition(db, p, { price: v.bid, coef, maker: false, reason: `${over ? 'an over later' : '5 minutes up'}: bid ${cents(v.bid)} (in at ${cents(p.avg_entry ?? v.bid)}), ${s.runs}/${s.wickets} in ${Math.floor(s.balls / 6)}.${s.balls % 6} ov`, now });
+            p.status = 'closed';
+          }
+          continue;
+        }
         const moved = meta.mid0 != null ? (p.side === 'long' ? q.mid - meta.mid0 : meta.mid0 - q.mid) : 0;
         const caught = meta.dp != null && moved >= (2 / 3) * Math.abs(meta.dp);
         if (caught || now - p.opened_at >= FLIP_AFTER) {
@@ -307,6 +336,20 @@ export class CricketFeed extends DurableObject<CricketEnv> {
               pick = v;
               why = `${ev.wickets ? `${ev.wickets} wicket${ev.wickets > 1 ? 's' : ''}` : `${ev.runs} runs`} moved the model ${dp > 0 ? '+' : ''}${Math.round(dp * 100)}¢ for ${m.long_team}; market ${marketMove >= 0 ? '+' : ''}${Math.round(marketMove * 100)}¢ so far`;
               meta = { dp: r4(dp), mid0: r4(q.mid), event: ev };
+            }
+          }
+        } else if (st.kind === 'bounce' && ev && !ev.inningsChanged && ev.wickets > 0 && s.innings === 1 && pNow != null && pBefore != null && spread <= 0.06) {
+          const lb = this.longBats(m, s);
+          const mid0 = this.midAt(m.slug, changedAt - 1);
+          if (lb != null && mid0 != null) {
+            const bat: Side = lb ? 'long' : 'short';
+            const modelDrop = Math.abs(pNow - pBefore);                       // what the wicket was worth to the batting side
+            const marketDrop = lb ? mid0 - q.mid : q.mid - mid0;              // how far the market marked them down
+            const v = view(bat);
+            if (modelDrop >= 0.01 && marketDrop > 1.3 * modelDrop && marketDrop >= 0.03 && v.ask >= 0.1 && v.ask <= 0.9) {
+              pick = v;
+              why = `wicket: market marked ${v.team} down ${Math.round(marketDrop * 100)}¢, the model says ${Math.round(modelDrop * 100)}¢`;
+              meta = { balls0: s.balls, innings0: s.innings, marketDrop: r4(marketDrop), modelDrop: r4(modelDrop) };
             }
           }
         } else if (st.kind === 'value' && s.innings === 2 && pNow != null && spread <= 0.05) {

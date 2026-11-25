@@ -128,7 +128,34 @@ function erf(x: number) {
   return x >= 0 ? y : -y;
 }
 
-export function battingWinProb(s: Pick<CricketState, 'format' | 'maxBalls' | 'innings' | 'runs' | 'wickets' | 'balls' | 'target'>): number | null {
+// The chase: a logistic model fitted on Cricsheet ball-by-ball data (3,305 men's T20Is, 2,207 ODIs, completed
+// results only; research_notes/cricket_model). Held-out log loss 0.361 (T20) and 0.392 (ODI). Inputs: runs needed n,
+// balls left b, wickets in hand w, required runs a ball r = n/b, share of the innings left f = b / total balls.
+const CHASE: Record<'t20' | 'odi', { int: number; c: [number, number, number, number, number, number] }> = {
+  t20: { int: 2.6211, c: [-0.1205, 0.7247, -2.9343, -0.0849, -4.7019, 3.7284] },
+  odi: { int: 2.5908, c: [-0.6184, 1.1752, -4.6914, -0.3992, -2.3864, 1.3338] },
+};
+export function chaseWinProb(format: 't20' | 'odi', need: number, ballsLeft: number, wicketsInHand: number, maxBalls: number): number {
+  if (need <= 0) return 1;
+  if (wicketsInHand <= 0 || ballsLeft <= 0) return 0;
+  const { int, c } = CHASE[format];
+  const r = need / ballsLeft, w = wicketsInHand, f = ballsLeft / maxBalls;
+  const z = int + c[0] * r + c[1] * w + c[2] * f + c[3] * r * w + c[4] * Math.log(need) + c[5] * Math.log(ballsLeft);
+  return Math.min(0.995, Math.max(0.005, 1 / (1 + Math.exp(-z))));
+}
+
+// The model doesn't know which team is stronger. The pre-match price does: blend them on the log-odds scale,
+// trusting the price more early on (logit P = logit P_model + k x share of balls left x logit p0). k = 1 to
+// start; the recorded marks will fit it.
+const logit = (p: number) => Math.log(p / (1 - p));
+export function withPrior(p: number, p0: number | null, shareLeft: number, k = 1): number {
+  if (p0 == null || !(p0 > 0.01 && p0 < 0.99) || p <= 0.005 || p >= 0.995) return p;
+  const z = logit(p) + k * Math.max(0, Math.min(1, shareLeft)) * logit(p0);
+  return Math.min(0.995, Math.max(0.005, 1 / (1 + Math.exp(-z))));
+}
+
+// p0: the batting side's pre-match price, when known.
+export function battingWinProb(s: Pick<CricketState, 'format' | 'maxBalls' | 'innings' | 'runs' | 'wickets' | 'balls' | 'target'>, p0: number | null = null): number | null {
   if (s.format === 'multi' || !s.maxBalls) return null;
   const par = PAR[s.format] * (s.maxBalls / (s.format === 't20' ? 120 : 300));
   const left = Math.max(0, s.maxBalls - s.balls);
@@ -136,15 +163,13 @@ export function battingWinProb(s: Pick<CricketState, 'format' | 'maxBalls' | 'in
     const need = s.target - s.runs;
     if (need <= 0) return 1;
     if (s.wickets >= 10 || left === 0) return 0;
-    const exp = par * resource(left, s.wickets, s.maxBalls);
-    const sd = Math.max(3, 0.18 * par * Math.sqrt(Math.max(0.01, resource(left, s.wickets, s.maxBalls))));
-    return Math.min(0.995, Math.max(0.005, phi((exp - need) / sd)));
+    return withPrior(chaseWinProb(s.format, need, left, 10 - s.wickets, s.maxBalls), p0, left / s.maxBalls);
   }
   if (s.innings === 1) {
     const projected = s.runs + par * resource(left, s.wickets, s.maxBalls);
     // The chase adds its own spread, so a first-innings lead counts for less than the same lead mid-chase.
     const sd = 0.18 * par * Math.SQRT2;
-    return Math.min(0.97, Math.max(0.03, phi((projected - par) / sd)));
+    return withPrior(Math.min(0.97, Math.max(0.03, phi((projected - par) / sd))), p0, (s.maxBalls + left) / (2 * s.maxBalls));
   }
   return null;
 }
