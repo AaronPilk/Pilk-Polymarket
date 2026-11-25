@@ -8,6 +8,8 @@ import { nextEvent } from './cryptomath';
 import { gradeSports, type SportsMark } from './sportsgrade';
 export { LiveFeed } from './live';
 export { CryptoFeed } from './crypto';
+export { CricketFeed } from './cricket';
+import { CRICKET_IDS } from './cricket';
 import { HOOPS_IDS } from './live';
 import { CRYPTO_IDS } from './crypto';
 
@@ -16,6 +18,8 @@ interface Env extends PmEnv {
   ASSETS: Fetcher;
   LIVE: DurableObjectNamespace;
   CRYPTO: DurableObjectNamespace;
+  CRICKET_FEED: DurableObjectNamespace;
+  CRICKET?: string;         // "off" puts the Cricket bot to sleep; on by default
   BOT_ALLOCATION?: string;  // the bot's bankroll in dollars, set by Aaron only (default 100)
   BOT_MAX_BET?: string;     // Aaron's cap per bet in dollars (none by default; bets grow with the account)
   BTC_STREAM?: string;      // "off" turns the live bitcoin streams off
@@ -50,7 +54,7 @@ export default {
       if (url.pathname === '/api/activities' && req.method === 'GET') return json(await listActivities(env));
       if (url.pathname === '/api/state' && req.method === 'GET') return json(await state(env));
       if (url.pathname === '/api/sync' && req.method === 'POST') return json(await sync(env));
-      if (url.pathname === '/api/bot' && req.method === 'GET') return json(await bot(env, url.searchParams.get('book') === 'sports' ? 'sports' : 'btc'));
+      if (url.pathname === '/api/bot' && req.method === 'GET') return json(await bot(env, url.searchParams.get('book') === 'sports' ? 'sports' : url.searchParams.get('book') === 'cricket' ? 'cricket' : 'btc'));
       if (url.pathname === '/api/bot/curve' && req.method === 'GET') return json(await botCurve(env, url.searchParams.get('range') || '1d', url.searchParams.get('mode') === 'live' ? 'live' : 'paper'));
       if (url.pathname === '/api/paper') {
         if (req.method === 'GET') return json(await listPaper(env));
@@ -80,6 +84,8 @@ export default {
     ctx.waitUntil(env.CRYPTO.get(env.CRYPTO.idFromName('btc')).fetch('https://crypto/kick').catch(() => undefined));
     // The live feed is told on every tick: with sports off it clears its own alarm and stays asleep.
     ctx.waitUntil(env.LIVE.get(env.LIVE.idFromName('live')).fetch('https://live/kick').catch(() => undefined));
+    // The Cricket bot (cricket.ts): paper only; CRICKET=off (a Cloudflare variable) puts it to sleep.
+    ctx.waitUntil(env.CRICKET_FEED.get(env.CRICKET_FEED.idFromName('cricket')).fetch('https://cricket/kick').catch(() => undefined));
     ctx.waitUntil((async () => {
       if (sports) {
         try { await recordMarkets(env, now, fullTick); }
@@ -161,7 +167,7 @@ async function state(env: Env) {
 // return per dollar with hours (bitcoin) or games (sports) as the unit. The bots read the verdicts:
 // retired strategies stop betting, testing ones bet 3% of their account, promising and proven bet normally.
 async function researchBoards(env: Env) {
-  for (const book of ['btc', 'sports'] as const) {
+  for (const book of ['btc', 'sports', 'cricket'] as const) {
     const { results } = await env.DB.prepare(AT_SIZE_SQL)
       .bind(BOOKS[book], RULES).all<{ strategy: string; pnl: number | null; cost: number | null; hr: number; game: string; real: number | null }>();
     const by = new Map<string, ReadyRow[]>();
@@ -181,7 +187,7 @@ async function researchBoards(env: Env) {
         quick = new Map([...qs].map(([id, a]) => [id, quickScore(a)]));
       } catch (e) { console.log('quick score error', String((e as any)?.message || e)); }
     }
-    const b = board(by, book === 'btc' ? CRYPTO_IDS : HOOPS_IDS, book, Date.now(), quick);
+    const b = board(by, book === 'btc' ? CRYPTO_IDS : book === 'cricket' ? CRICKET_IDS : HOOPS_IDS, book, Date.now(), quick);
     await env.DB.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at')
       .bind(`lab_${book}`, JSON.stringify(b), Date.now()).run();
   }
@@ -201,7 +207,7 @@ async function gradeSportsBook(env: Env) {
 // says whose it is: crypto_ = the Bitcoin bot, hoops_ = the Sports bot. Each bot has its own paper
 // lineup, its own learning, risk ladder and readiness card (and the Bitcoin bot its live account),
 // and nothing here ever adds the two together, except the head-to-head, which compares them.
-const BOOKS = { btc: 'crypto_%', sports: 'hoops_%' } as const;
+const BOOKS = { btc: 'crypto_%', sports: 'hoops_%', cricket: 'cricket_%' } as const;
 type Book = keyof typeof BOOKS;
 
 async function bot(env: Env, book: Book) {
@@ -225,7 +231,8 @@ async function bot(env: Env, book: Book) {
     const positions = [];
     for (const p of open) {
       const t = (await q<{ bid: number | null; ask: number | null; ts: number }>(
-        'SELECT bid, ask, ts FROM ticks WHERE slug = ? ORDER BY ts DESC LIMIT 1', p.market_slug))[0];
+        p.strategy?.startsWith('cricket_') ? 'SELECT bid, ask, ts FROM cricket_marks WHERE slug = ? AND bid IS NOT NULL ORDER BY ts DESC LIMIT 1'
+          : 'SELECT bid, ask, ts FROM ticks WHERE slug = ? ORDER BY ts DESC LIMIT 1', p.market_slug))[0];
       const exit = t ? (p.side === 'long' ? t.bid : t.ask != null ? 1 - t.ask : null) : null;
       const value = exit != null ? exit * (p.qty || 0) : null;
       const netIn = (p.cost || 0) - (p.proceeds || 0);
@@ -255,7 +262,7 @@ async function bot(env: Env, book: Book) {
     FROM bot_positions WHERE mode = 'paper'${scope} GROUP BY strategy ORDER BY strategy`);
   const isBtcSlug = "(s.slug LIKE 'cpc-btc-%' OR s.slug LIKE 'btc-above-%')";
   const signals = await q<any>(`SELECT s.slug, s.ts, s.kind, s.side, s.price, s.ref, s.detail, m.title, m.league
-    FROM signals s LEFT JOIN markets m ON m.slug = s.slug WHERE ${book === 'btc' ? isBtcSlug : `NOT ${isBtcSlug}`} ORDER BY s.ts DESC LIMIT 30`);
+    FROM signals s LEFT JOIN markets m ON m.slug = s.slug WHERE ${book === 'btc' ? isBtcSlug : book === 'cricket' ? '0' : `NOT ${isBtcSlug}`} ORDER BY s.ts DESC LIMIT 30`);
 
   let live = null, model = null, ready = null, exits = null, records = null, riskFor: { strategy?: string; mode: 'paper' | 'live' };
   if (book === 'btc') {
@@ -311,12 +318,12 @@ async function bot(env: Env, book: Book) {
   } else {
     // The Sports bot: paper only. Its card follows one strategy (Aaron's style by default) and
     // counts different games, since several trades in one game are one bet on that game.
-    const id = env.SPORTS_STRATEGY || 'hoops_trailer_v1';
+    const id = book === 'cricket' ? 'cricket_lag_flip' : env.SPORTS_STRATEGY || 'hoops_trailer_v1';
     const rows = await q<{ pnl: number; cost: number; group: string }>(`SELECT pnl, cost, market_slug AS "group" FROM bot_positions
       WHERE mode = 'paper' AND strategy = ? AND status != 'open' ORDER BY closed_at`, id);
     const games = (await q<{ n: number }>(`SELECT COUNT(DISTINCT market_slug) AS n FROM bot_positions WHERE mode = 'paper' AND strategy = ? AND status != 'open'`, id))[0]?.n || 0;
     ready = { strategy: id, ...readiness(rows, allocation, null, { kind: 'sports', games }) };
-    const hm = (await q<{ v: string; at: number }>("SELECT v, at FROM brain WHERE k = 'hoops_model'"))[0];
+    const hm = book === 'cricket' ? undefined : (await q<{ v: string; at: number }>("SELECT v, at FROM brain WHERE k = 'hoops_model'"))[0];
     const pending = (await q<{ n: number }>('SELECT COUNT(DISTINCT h.slug) AS n FROM hoops_marks h JOIN markets m ON m.slug = h.slug WHERE m.result IS NULL'))[0]?.n || 0;
     try { model = { ...(hm ? JSON.parse(hm.v) : { games: 0 }), at: hm?.at ?? null, pending }; } catch { model = { games: 0, pending }; }
     riskFor = { strategy: id, mode: 'paper' };
@@ -367,7 +374,7 @@ const SPANS: Record<string, number> = { '1h': 3_600_000, '1d': 86_400_000, '1w':
 // The big test accounts (ids ending _1k, _5k, _10k) are their own groups, so they never swamp the $100 lineup's line.
 const groupOf = (strategy: string | null) => {
   const k = strategy?.match(/_(1k|5k|10k)$/)?.[1] ?? '';
-  return strategy?.startsWith('crypto_') ? `btc${k}` : strategy?.startsWith('hoops_') ? `hoops${k}` : 'other';
+  return strategy?.startsWith('crypto_') ? `btc${k}` : strategy?.startsWith('hoops_') ? `hoops${k}` : strategy?.startsWith('cricket_') ? `cricket${k}` : 'other';
 };
 
 async function botCurve(env: Env, range: string, mode: 'paper' | 'live') {
@@ -383,7 +390,7 @@ async function botCurve(env: Env, range: string, mode: 'paper' | 'live') {
   }
   const N = 120, S = 24;
   const step = (now - from) / N;
-  const groups = ['all', 'btc', 'hoops', 'btc1k', 'hoops1k', 'btc5k', 'hoops5k', 'btc10k', 'hoops10k'] as const;
+  const groups = ['all', 'btc', 'hoops', 'cricket', 'btc1k', 'hoops1k', 'cricket1k', 'btc5k', 'hoops5k', 'cricket5k', 'btc10k', 'hoops10k', 'cricket10k'] as const;
   const sum: Record<string, number[]> = {}, n: Record<string, number[]> = {};
   const wins: Record<string, number> = {}, losses: Record<string, number> = {};
   for (const g of groups) { sum[g] = new Array(N).fill(0); n[g] = new Array(N).fill(0); wins[g] = 0; losses[g] = 0; }

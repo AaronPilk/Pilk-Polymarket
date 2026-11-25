@@ -20,10 +20,11 @@ import { TAKER_COEF, TIERED } from './fairvalue';
 // rules change enough that older bets no longer say anything about the new ones.
 export const RULES = 2;
 export type Status = 'retired' | 'testing' | 'promising' | 'proven';
-export type Book = 'btc' | 'sports';
+export type Book = 'btc' | 'sports' | 'cricket';
 export const LAB: Record<Book, { judge: number; groups: number; proven: number }> = {
   btc: { judge: 30, groups: 6, proven: 200 },       // groups: hours
   sports: { judge: 30, groups: 8, proven: 100 },    // groups: games
+  cricket: { judge: 30, groups: 8, proven: 100 },   // groups: matches
 };
 // (The old single 1.64 bar, Z, was split into Z_RETIRE and Z_UP below.)
 // Nov 25, 10-day test (research_notes/ten_day_test_rules.md): the board looks every 5 minutes, and a 1.64 bar

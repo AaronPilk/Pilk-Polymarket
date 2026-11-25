@@ -309,7 +309,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
 
   private async loadLive(now: number) {
     const { results } = await this.env.DB.prepare(
-      'SELECT slug, league, long_team, short_team, game_start, espn_id, start_mid FROM markets WHERE result IS NULL AND game_start <= ? AND game_start >= ? ORDER BY game_start',
+      "SELECT slug, league, long_team, short_team, game_start, espn_id, start_mid FROM markets WHERE result IS NULL AND game_start <= ? AND game_start >= ? AND league NOT LIKE 'cricket:%' ORDER BY game_start",
     ).bind(new Date(now + 10 * MIN).toISOString(), new Date(now - 5 * 60 * MIN).toISOString()).all<LiveMarket>();
     const linked = new Map(this.live.map((m) => [m.slug, m.espn_id]));
     this.live = results.map((m) => ({ ...m, espn_id: m.espn_id || linked.get(m.slug) || null }));
@@ -350,7 +350,7 @@ export class LiveFeed extends DurableObject<LiveEnv> {
   }
 
   private async sleepUntilNextGame(now: number) {
-    const next = await this.env.DB.prepare('SELECT MIN(game_start) AS t FROM markets WHERE result IS NULL AND game_start > ?')
+    const next = await this.env.DB.prepare("SELECT MIN(game_start) AS t FROM markets WHERE result IS NULL AND game_start > ? AND league NOT LIKE 'cricket:%'")
       .bind(new Date(now).toISOString()).first<{ t: string | null }>();
     const wake = next?.t ? Date.parse(next.t) - 10 * MIN : now + MAX_SLEEP;
     await this.ctx.storage.setAlarm(Math.max(now + MIN, Math.min(wake, now + MAX_SLEEP)));

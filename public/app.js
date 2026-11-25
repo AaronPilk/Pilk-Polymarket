@@ -6,7 +6,7 @@ const store = {
   state: null,     // { snapshot, lastSync, apiConfigured }
   bot: null,      // /api/bot: the bot's own ledger
   botRange: 'run', // bot chart: run (bets on the current rules) | 1h | 1d | 1w | all
-  botBook: (() => { try { return localStorage.getItem('pm-bot-book') === 'sports' ? 'sports' : 'btc'; } catch { return 'btc'; } })(), // btc | sports: two bots, two books
+  botBook: (() => { try { const v = localStorage.getItem('pm-bot-book'); return v === 'sports' || v === 'cricket' ? v : 'btc'; } catch { return 'btc'; } })(), // btc | sports | cricket: three bots, three books
   botGroup: 'btc', // live | btc | hoops
   botGroupSet: false,
   botCurve: {},    // 'paper:1d' | 'live:all' ... -> { at, data } from /api/bot/curve
@@ -501,6 +501,10 @@ const clvText = (p) => {
 };
 const API_FEE_SHARE = (0.0695 * 0.3) / 0.095;   // API taker fees after the 70% rebate, as a share of paper's
 const STRATEGY_LABEL = {
+  // Nov 25: the Cricket bot (src/cricket.ts)
+  cricket_lag_flip: 'Cricket · score lag, sell when the price catches up',
+  cricket_lag_hold: 'Cricket · score lag, hold to the result',
+  cricket_value: 'Cricket · model value in the chase',
   crypto_fair_v1: 'Bitcoin · price vs math',
   crypto_fair_strict: 'Bitcoin · price vs math, strict',
   crypto_fair_max: 'Bitcoin · price vs math, bigger bets',
@@ -575,19 +579,20 @@ for (const base of Object.keys(STRATEGY_LABEL).filter((id) => !/_(1k|5k|10k)$/.t
 }
 const TEST_START = Date.parse('2026-11-25T21:00:00Z'), TEST_END = Date.parse('2026-12-05T21:00:00Z');
 const variantOf = (id) => (STRATEGY_LABEL[id] || id || '').split(' · ')[1] || '';
-const bookOf = (s) => (s?.startsWith('crypto_') ? 'btc' : s?.startsWith('hoops_') ? 'sports' : 'other');
+const bookOf = (s) => (s?.startsWith('crypto_') ? 'btc' : s?.startsWith('hoops_') ? 'sports' : s?.startsWith('cricket_') ? 'cricket' : 'other');
 // The big test accounts: the same rules as if the account started at $1,000, $5,000 or $10,000 (ids end _1k/_5k/_10k).
 const SIZES = [['1k', 1000, '$1,000'], ['5k', 5000, '$5,000'], ['10k', 10000, '$10,000']];
 const sizeOf = (s) => String(s || '').match(/_(1k|5k|10k)$/)?.[1] || '';
 const is1k = (s) => !!sizeOf(s);
-const groupOf = (s) => (s?.startsWith('crypto_') ? `btc${sizeOf(s)}` : s?.startsWith('hoops_') ? `hoops${sizeOf(s)}` : 'other');
-const GROUP_LABEL = { live: 'Real money', btc: 'Paper · Bitcoin', hoops: 'Paper · Basketball',
-  ...Object.fromEntries(SIZES.flatMap(([k, , n]) => [[`btc${k}`, `Bitcoin ${n}`], [`hoops${k}`, `Basketball ${n}`]])) };
+const groupOf = (s) => (s?.startsWith('crypto_') ? `btc${sizeOf(s)}` : s?.startsWith('hoops_') ? `hoops${sizeOf(s)}` : s?.startsWith('cricket_') ? `cricket${sizeOf(s)}` : 'other');
+const GROUP_LABEL = { live: 'Real money', btc: 'Paper · Bitcoin', hoops: 'Paper · Basketball', cricket: 'Paper · Cricket',
+  ...Object.fromEntries(SIZES.flatMap(([k, , n]) => [[`btc${k}`, `Bitcoin ${n}`], [`hoops${k}`, `Basketball ${n}`], [`cricket${k}`, `Cricket ${n}`]])) };
 // Short names for the chips over the chart, so all the account sizes fit on a phone.
-const CHIP_LABEL = { live: 'Real money', btc: '$100 accounts', hoops: '$100 accounts', ...Object.fromEntries(SIZES.flatMap(([k]) => [[`btc${k}`, `$${k.toUpperCase()}`], [`hoops${k}`, `$${k.toUpperCase()}`]])) };
+const CHIP_LABEL = { live: 'Real money', btc: '$100 accounts', hoops: '$100 accounts', cricket: '$100 accounts', ...Object.fromEntries(SIZES.flatMap(([k]) => [[`btc${k}`, `$${k.toUpperCase()}`], [`hoops${k}`, `$${k.toUpperCase()}`], [`cricket${k}`, `$${k.toUpperCase()}`]])) };
 const groupBank = (g, b) => SIZES.find(([k]) => String(g).endsWith(k))?.[1] || b?.allocation || 100;
-const BOOK_LABEL = { btc: 'Bitcoin bot', sports: 'Sports bot' };
-const BOOK_GROUP = { btc: 'btc', sports: 'hoops' };
+const BOOK_LABEL = { btc: 'Bitcoin bot', sports: 'Sports bot', cricket: 'Cricket bot' };
+const BOOK_GROUP = { btc: 'btc', sports: 'hoops', cricket: 'cricket' };
+const BOOK_NAME = { btc: 'Bitcoin', sports: 'Basketball', cricket: 'Cricket' };
 const BOT_RANGE_LABEL = { run: 'This run, on the new rules', '1h': 'Last hour', '1d': 'Last 24 hours', '1w': 'Last 7 days', all: 'Since it started' };
 const iconBadge = ([bg, fg, path]) => `<span class="badge" style="background:${bg};color:${fg}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${path}</svg></span>`;
 const signalBadge = (kind) => iconBadge(SIGNAL_ICON[kind] || SIGNAL_ICON.swing);
@@ -602,7 +607,7 @@ async function loadCurve(range, mode) {
 }
 // Each bot shows only its own book: the Bitcoin bot's paper lineup (and real money once it trades),
 // or the Sports bot's paper lineup. They're never added together.
-const botGroups = (b) => (b?.book === 'sports' ? ['hoops'] : [...(b?.live ? ['live'] : []), 'btc']);
+const botGroups = (b) => (b?.book === 'sports' ? ['hoops'] : b?.book === 'cricket' ? ['cricket'] : [...(b?.live ? ['live'] : []), 'btc']);
 // Nov 25: one card per strategy with its $100 / $1K / $5K / $10K accounts inside it, and the headline number counts
 // only the $100 accounts of strategies still running (retired ones are listed apart, never mixed in).
 // A bigger copy's own strategy: crypto_fav_99_1m_10k -> crypto_fav_99_1m; model value's copies drop the _v1
@@ -641,7 +646,7 @@ async function refreshBot({ curve = false } = {}) {
     const prev = store.bot;
     const closedChanged = !!prev && (b.record?.closed !== prev.record?.closed || b.live?.record?.closed !== prev.live?.record?.closed);
     store.bot = b;
-    if (!store.botGroupSet || !botGroups(b).includes(store.botGroup)) { store.botGroup = b.book === 'sports' ? 'hoops' : b.live ? 'live' : 'btc'; store.botGroupSet = true; }
+    if (!store.botGroupSet || !botGroups(b).includes(store.botGroup)) { store.botGroup = b.book === 'sports' ? 'hoops' : b.book === 'cricket' ? 'cricket' : b.live ? 'live' : 'btc'; store.botGroupSet = true; }
     const need = [['paper', store.botRange], ...(b.live ? [['live', store.botRange]] : [])];
     await Promise.all(need.map(([mode, range]) => {
       const c = store.botCurve[curveKey(mode, range)];
@@ -664,7 +669,7 @@ function renderBot() {
   if (!botBuilt) {
     el.innerHTML = `
       <div class="segmented book-switch" id="bot-book" role="tablist" aria-label="Which bot"><div class="thumb"></div>
-        <button data-book="btc" role="tab">Bitcoin bot</button><button data-book="sports" role="tab">Sports bot</button>
+        <button data-book="btc" role="tab">Bitcoin</button><button data-book="sports" role="tab">Basketball</button><button data-book="cricket" role="tab">Cricket</button>
       </div>
       <div class="hero"><div class="hero-label" id="bot-label"></div><div class="hero-value num" id="bot-value">–</div><div class="hero-sub" id="bot-sub"></div></div>
       <div class="chips bot-chips" id="bot-groups"></div>
@@ -1323,8 +1328,8 @@ function botRest(b) {
     <div class="section">
       <div class="section-title">All-time by strategy<small>each its own ${money(b.allocation, { cents: false })}</small></div>
       <div class="stats" style="margin-bottom:6px">${tiles.map(statTile).join('')}</div>
-      ${stratGroup(group, `${book === 'btc' ? 'Bitcoin' : 'Basketball'} · $100 accounts`)}
-      ${SIZES.map(([k, , n]) => stratGroup(`${group}${k}`, `${book === 'btc' ? 'Bitcoin' : 'Basketball'} · ${n} accounts`)).join('')}
+      ${stratGroup(group, `${BOOK_NAME[book]} · $100 accounts`)}
+      ${SIZES.map(([k, , n]) => stratGroup(`${group}${k}`, `${BOOK_NAME[book]} · ${n} accounts`)).join('')}
       ${book === 'sports' && !b.sports ? '<div class="card pad off-note"><b>The Sports bot is asleep.</b> SPORTS is set to off in Cloudflare.</div>' : ''}
     </div>
 
@@ -1342,7 +1347,7 @@ function botRest(b) {
     <div class="section">
       <div class="section-title">Bot's eye<small>what it's flagging</small></div>
       ${b.signals.length ? `<div class="card">${b.signals.slice(0, 20).map(sigRow).join('')}</div>`
-        : `<div class="card empty"><h3>Nothing flagged yet</h3>${book === 'btc' ? 'It watches the bitcoin windows and flags the moments worth a look.' : 'It watches live NBA and college games and flags the moments worth a look.'}</div>`}
+        : `<div class="card empty"><h3>Nothing flagged yet</h3>${book === 'btc' ? 'It watches the bitcoin windows and flags the moments worth a look.' : book === 'cricket' ? 'The Cricket bot records every score change and price move to measure the lag; it doesn\'t flag moments yet.' : 'It watches live NBA and college games and flags the moments worth a look.'}</div>`}
     </div>
 
     <div class="section">

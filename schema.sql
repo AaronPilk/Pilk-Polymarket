@@ -234,3 +234,12 @@ CREATE TABLE IF NOT EXISTS hoops_marks (
   share_left REAL, lead INTEGER, fair REAL, bid REAL, ask REAL, start REAL,
   PRIMARY KEY (slug, point)
 ) WITHOUT ROWID;
+
+-- Nov 25: the Cricket bot (src/cricket.ts). One row whenever a live cricket match's quote or score changes:
+-- the long side's best bid/ask, ESPN's score state, the model's win chance for the long side, and when the
+-- score last changed (score_at), so the lag between a scoring event and the price can be measured.
+CREATE TABLE IF NOT EXISTS cricket_marks (
+  slug TEXT NOT NULL, ts INTEGER NOT NULL, bid REAL, ask REAL, espn_id TEXT, state TEXT,
+  innings INTEGER, runs INTEGER, wickets INTEGER, balls INTEGER, target INTEGER, p_long REAL, score_at INTEGER,
+  PRIMARY KEY (slug, ts)
+);

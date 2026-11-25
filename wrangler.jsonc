@@ -16,8 +16,9 @@
   },
   // Live game feed: one Durable Object that loops every 5 s while games are live.
   // Crypto feed: bitcoin Up or Down windows around the clock, every 5 s.
-  "durable_objects": { "bindings": [{ "name": "LIVE", "class_name": "LiveFeed" }, { "name": "CRYPTO", "class_name": "CryptoFeed" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LiveFeed"] }, { "tag": "v2", "new_sqlite_classes": ["CryptoFeed"] }],
+  // Cricket feed (Nov 25): cricket match-winner markets, every 3 s while a match is live. Paper only.
+  "durable_objects": { "bindings": [{ "name": "LIVE", "class_name": "LiveFeed" }, { "name": "CRYPTO", "class_name": "CryptoFeed" }, { "name": "CRICKET_FEED", "class_name": "CricketFeed" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LiveFeed"] }, { "tag": "v2", "new_sqlite_classes": ["CryptoFeed"] }, { "tag": "v3", "new_sqlite_classes": ["CricketFeed"] }],
   "d1_databases": [
     { "binding": "DB", "database_name": "pilk-polymarket", "database_id": "43cb2ffb-75a3-4472-9b28-41b2a9429ea0" }
   ],
