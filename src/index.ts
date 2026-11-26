@@ -9,6 +9,7 @@ import { gradeSports, type SportsMark } from './sportsgrade';
 export { LiveFeed } from './live';
 export { CryptoFeed } from './crypto';
 export { CricketFeed } from './cricket';
+export { BookFeed } from './books';
 import { CRICKET_IDS } from './cricket';
 import { HOOPS_IDS } from './live';
 import { CRYPTO_IDS } from './crypto';
@@ -19,6 +20,8 @@ interface Env extends PmEnv {
   LIVE: DurableObjectNamespace;
   CRYPTO: DurableObjectNamespace;
   CRICKET_FEED: DurableObjectNamespace;
+  BOOK_FEED: DurableObjectNamespace;
+  BOOKS?: string;           // "off" stops the pregame order-book recorder (books.ts); on by default
   CRICKET?: string;         // "off" puts the Cricket bot to sleep; on by default
   BOT_ALLOCATION?: string;  // the bot's bankroll in dollars, set by Aaron only (default 100)
   BOT_MAX_BET?: string;     // Aaron's cap per bet in dollars (none by default; bets grow with the account)
@@ -56,6 +59,7 @@ export default {
       if (url.pathname === '/api/sync' && req.method === 'POST') return json(await sync(env));
       if (url.pathname === '/api/bot' && req.method === 'GET') return json(await bot(env, url.searchParams.get('book') === 'sports' ? 'sports' : url.searchParams.get('book') === 'cricket' ? 'cricket' : 'btc'));
       if (url.pathname === '/api/bot/curve' && req.method === 'GET') return json(await botCurve(env, url.searchParams.get('range') || '1d', url.searchParams.get('mode') === 'live' ? 'live' : 'paper'));
+      if (url.pathname === '/api/books' && req.method === 'GET') return json(await booksStatus(env));
       if (url.pathname === '/api/paper') {
         if (req.method === 'GET') return json(await listPaper(env));
         if (req.method === 'POST') return json(await addPaper(env, await req.json()));
@@ -86,6 +90,8 @@ export default {
     ctx.waitUntil(env.LIVE.get(env.LIVE.idFromName('live')).fetch('https://live/kick').catch(() => undefined));
     // The Cricket bot (cricket.ts): paper only; CRICKET=off (a Cloudflare variable) puts it to sleep.
     ctx.waitUntil(env.CRICKET_FEED.get(env.CRICKET_FEED.idFromName('cricket')).fetch('https://cricket/kick').catch(() => undefined));
+    // The pregame order-book recorder (books.ts): recording only; BOOKS=off or SPORTS=off puts it to sleep.
+    ctx.waitUntil(env.BOOK_FEED.get(env.BOOK_FEED.idFromName('books')).fetch('https://books/kick').catch(() => undefined));
     ctx.waitUntil((async () => {
       if (sports) {
         try { await recordMarkets(env, now, fullTick); }
@@ -106,6 +112,14 @@ export default {
 };
 
 // ---------- data
+
+// The pregame order-book recorder: what it's watching right now and how much it has written.
+async function booksStatus(env: Env) {
+  const live = await env.BOOK_FEED.get(env.BOOK_FEED.idFromName('books')).fetch('https://books/status').then((r) => r.json()).catch((e) => ({ error: String(e?.message || e) }));
+  const rows = await env.DB.prepare("SELECT k, n, last FROM stats WHERE k IN ('book_quotes', 'book_levels', 'book_trades', 'books_now')")
+    .all<{ k: string; n: number; last: number | null }>().catch(() => null);
+  return { recorder: live, totals: Object.fromEntries((rows?.results || []).map((r) => [r.k, { n: r.n, last: r.last ? new Date(r.last).toISOString() : null }])) };
+}
 
 async function listActivities(env: Env) {
   const { results } = await env.DB.prepare(`SELECT ${COLS.join(',')} FROM activities WHERE type != 'TRADE_FILL' ORDER BY t DESC`).all();

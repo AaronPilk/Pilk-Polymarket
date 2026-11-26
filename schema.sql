@@ -243,3 +243,12 @@ CREATE TABLE IF NOT EXISTS cricket_marks (
   innings INTEGER, runs INTEGER, wickets INTEGER, balls INTEGER, target INTEGER, p_long REAL, score_at INTEGER,
   PRIMARY KEY (slug, ts)
 );
+
+-- Pregame order-book recorder (books.ts, Nov 26). Basketball from 6 h before tip-off to 15 min after.
+-- Recording only. The Durable Object creates these itself (BOOKS_DDL); kept here for reference.
+CREATE TABLE IF NOT EXISTS book_quotes (slug TEXT NOT NULL, ts INTEGER NOT NULL, bid REAL, ask REAL, bid_depth REAL, ask_depth REAL,
+    cur REAL, last REAL, vol REAL, state TEXT, pre INTEGER, PRIMARY KEY (slug, ts));
+CREATE TABLE IF NOT EXISTS book_levels (slug TEXT NOT NULL, ts INTEGER NOT NULL, bids TEXT, asks TEXT, pre INTEGER, PRIMARY KEY (slug, ts));
+CREATE TABLE IF NOT EXISTS book_trades (id INTEGER PRIMARY KEY AUTOINCREMENT, slug TEXT NOT NULL, ts INTEGER NOT NULL, recv INTEGER,
+    price REAL, qty REAL, taker_side TEXT, taker_intent TEXT, maker_intent TEXT, pre INTEGER);
+CREATE INDEX IF NOT EXISTS idx_book_trades_slug ON book_trades(slug, ts);
