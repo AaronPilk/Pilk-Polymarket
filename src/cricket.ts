@@ -45,6 +45,11 @@ const MAX_SLEEP = 10 * MIN;
 // How long after the start a match can still be live: T20 about 3.5 h, 50 overs about 8 h, first-class 4-5 days.
 const LIVE_FOR: Record<string, number> = { t20: 5 * 60 * MIN, odi: 10 * 60 * MIN, multi: 5 * 24 * 60 * MIN };
 const FLIP_AFTER = 90_000;
+// Nov 26: the first value bet (J&K v Haryana, model 44c vs ask 15c) came off a domestic match ESPN enters in bursts
+// minutes apart, so the "edge" was the market knowing the score before we did. Like the other bots, an edge too big
+// to believe is treated as a data problem, and the score must have moved in the last 3 minutes.
+const MAX_EDGE = 0.2;
+const FRESH = 3 * MIN;
 // ESPN league ids for the per-league scoreboard fallback (checked Nov 25 against live scoreboards).
 const LEAGUE_IDS: Record<string, string> = {
   smat: '8661', wbbl: '21284', sheffield: '8043', plunket: '8828', hjs: '8818', ford: '8880', bbl: '8044', sa20: '21275', ilt20: '20921',
@@ -394,10 +399,10 @@ export class CricketFeed extends DurableObject<CricketEnv> {
               meta = { balls0: s.balls, innings0: s.innings, marketDrop: r4(marketDrop), modelDrop: r4(modelDrop) };
             }
           }
-        } else if (st.kind === 'value' && s.innings === 2 && pNow != null && spread <= 0.05) {
+        } else if (st.kind === 'value' && s.innings === 2 && pNow != null && spread <= 0.05 && now - changedAt <= FRESH) {
           if (await db.prepare('SELECT 1 FROM bot_positions WHERE strategy = ? AND market_slug = ? LIMIT 1').bind(st.id, m.slug).first()) continue;
           const best = (['long', 'short'] as Side[]).map(view).map((v) => ({ ...v, fair: v.side === 'long' ? pNow : 1 - pNow }))
-            .map((v) => ({ ...v, edge: v.fair - v.ask - fee(v.ask) })).filter((v) => v.ask >= 0.08 && v.ask <= 0.92 && v.edge >= 0.08).sort((a, b) => b.edge - a.edge)[0];
+            .map((v) => ({ ...v, edge: v.fair - v.ask - fee(v.ask) })).filter((v) => v.ask >= 0.08 && v.ask <= 0.92 && v.edge >= 0.08 && v.edge <= MAX_EDGE).sort((a, b) => b.edge - a.edge)[0];
           if (best) { pick = best; why = `model ${cents(best.fair)} vs ask ${cents(best.ask)} in the chase`; meta = { fair: r4(best.fair) }; }
         }
         if (!pick) continue;
