@@ -38,7 +38,12 @@ export const ballsOf = (overs: number | null | undefined): number => {
 };
 
 export function formatOf(ev: any): Format {
-  const t = String(ev?.competitions?.[0]?.class?.eventType || '').toLowerCase();
+  // Women's matches leave eventType blank (WBBL: eventType "", generalClassCard "Women's T20"), so read every class
+  // field, then fall back to the overs limit in the score string ("89/1 (8.3/20 ov)").
+  const cls = ev?.competitions?.[0]?.class || {};
+  const t = [cls.eventType, cls.generalClassCard, cls.name].map((x: any) => String(x || '')).join(' ').toLowerCase();
+  const lim = (ev?.competitions?.[0]?.competitors || []).map((x: any) => String(x.score || '').match(/\/(\d+)(?:\.\d)? ov/)?.[1]).find(Boolean);
+  if (!t.trim() && lim) return Number(lim) <= 20 ? 't20' : Number(lim) <= 50 ? 'odi' : 'multi';
   if (t.includes('t20') || t.includes('twenty') || t.includes('100')) return 't20';
   if (t.includes('odi') || t.includes('list')) return 'odi';
   return 'multi';

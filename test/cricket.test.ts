@@ -22,6 +22,11 @@ test('cricket: ESPN scorepanel event -> state (innings, score, balls, target, fo
   assert.equal(s.battingTeam, 'Desert Vipers');
   assert.deepEqual([s.runs, s.wickets, s.balls, s.target, s.maxBalls], [90, 3, 75, 165, 120]);
   assert.equal(cricketState(ev({ type: 'Test' }))!.format, 'multi');
+  // WBBL: blank eventType, the class card and the overs limit say T20
+  const w = ev({ type: '' }); w.competitions[0].class = { eventType: '', generalClassCard: "Women's T20", name: '' };
+  assert.equal(cricketState(w)!.format, 't20');
+  const bare = ev({ type: '' }); bare.competitions[0].class = { eventType: '' };
+  assert.equal(cricketState(bare)!.format, 't20');   // from "12.3/20 ov" in the score
 });
 
 test('cricket: win chance moves the right way and by sensible amounts', () => {
