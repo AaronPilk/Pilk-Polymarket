@@ -1505,7 +1505,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     // to think it's allowed to trade $100 every time"):
     //  - the day is claimed with one atomic write (only the first claim of an ET date succeeds), so two
     //    windows betting at once can't both get it, and if that write fails the bet stays normal size;
-    //  - only on a 97¢+ favorite; never more than the account has free; hard max $250;
+    //  - only on a 98¢+ favorite (the Nov 27 3:30 PM loss was a 97¢ buy); never more than the account has free; hard max $250;
     //  - the claim is released only when the exchange clearly said no (reject, 4xx, or answered with no
     //    fill). A timeout or server error keeps it used for the day, in case the order went through anyway.
     // Every other bet keeps the 5% / LIVE_MAX_BET caps. Unset LIVE_DAILY_BET to stop it.

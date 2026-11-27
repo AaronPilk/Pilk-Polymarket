@@ -309,8 +309,8 @@ export function dailyBet(raw: unknown): number | null {
   return v >= 1 && v <= 250 ? v : null;
 }
 
-// The once-a-day bonus bet: only on a 97¢+ favorite, never over $250 of contracts.
-export const DAILY_MIN_ASK = 0.97;
+// The once-a-day bonus bet: only on a 98¢+ favorite, never over $250 of contracts.
+export const DAILY_MIN_ASK = 0.98;
 export const DAILY_HARD_MAX = 250;
 // Release the day's bonus-bet claim only when the exchange clearly answered no. A timeout, network
 // error or 5xx might have gone through, so those keep the day used.

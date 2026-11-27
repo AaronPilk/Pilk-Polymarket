@@ -316,6 +316,6 @@ test('daily bonus bet: day released only when the exchange clearly said no', () 
   assert.equal(dailyClearlyRefused({ error: 'The operation was aborted due to timeout', reject: null, filled: 0 }), false);
   assert.equal(dailyClearlyRefused({ error: 'HTTP 502: bad gateway', reject: null, filled: 0 }), false);
   assert.equal(dailyClearlyRefused({ error: null, reject: null, filled: 103 }), false);
-  assert.equal(DAILY_MIN_ASK, 0.97);
+  assert.equal(DAILY_MIN_ASK, 0.98);
   assert.equal(DAILY_HARD_MAX, 250);
 });
