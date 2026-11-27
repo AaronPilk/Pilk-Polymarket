@@ -1408,7 +1408,17 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       fair: this.sizingProb(best, mid, tau), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
       fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.liveCeiling(), recordKelly: this.records.get(parentOf(st.id) ?? st.id)?.f ?? 0,
     });
-    const qty = Math.floor(stake / best.ask);
+    // Aaron's real-money cap, checked twice: once inside stakeFor and again here on the contract
+    // count, and if a cap is set but can't be read the bot skips the bet instead of betting full size
+    // (Nov 26: the first real bet came out at $9.82 with LIVE_MAX_BET = 3).
+    const cap = this.liveCeiling();
+    const rawCap = (this.env as any).LIVE_MAX_BET;
+    if (rawCap != null && String(rawCap).trim() !== '' && cap == null) {
+      this.liveEvent(now, 'error', w.slug, `${name}: LIVE_MAX_BET is set (${JSON.stringify(rawCap)}) but couldn't be read as dollars, skipped`);
+      return;
+    }
+    let qty = Math.floor(stake / best.ask);
+    if (cap != null) qty = Math.min(qty, Math.floor(cap / best.ask));
     if (qty < 1) return;   // real money: no probes
     // Never trade a window where the account holds anything, or has orders the bot didn't place:
     // those are Aaron's, and the exchange would net them against the bot's.
@@ -1437,11 +1447,11 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side, sideName: name,
       qty: r.filled, avgPx: r.avgSidePx, fee: r.fee, limitPx: best.ask, exchangeId: r.id,
       reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${leftText(tau)}`, now,
-      meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), feeds: this.feedsNow(now), equity: r2(bank.equity), asked: qty, rules: RULES },
+      meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), feeds: this.feedsNow(now), equity: r2(bank.equity), asked: qty, stake: r2(stake), cap, capRaw: rawCap == null ? null : String(rawCap), rules: RULES },
     });
     this.open.push(pos);
     this.bankCache.delete('live');
-    this.liveEvent(now, 'buy', w.slug, `Bought ${r.filled} ${name} at ${cents(r.avgSidePx)} for $${(r.filled * r.avgSidePx + r.fee).toFixed(2)} (fee $${r.fee.toFixed(2)}); math says ${cents(best.fair)}`);
+    this.liveEvent(now, 'buy', w.slug, `Bought ${r.filled} ${name} at ${cents(r.avgSidePx)} for $${(r.filled * r.avgSidePx + r.fee).toFixed(2)} (fee $${r.fee.toFixed(2)}); math says ${cents(best.fair)}; cap ${cap != null ? '$' + cap : 'none'}`);
     // His 2x idea where this strategy uses it: a resting sell at double the fill, maker only.
     const tp = takeProfitFor(r.avgSidePx, st.tpBelow);
     if (tp != null) {
