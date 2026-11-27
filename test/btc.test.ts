@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_BLEND, blendProb, eventFor, fitBlend, gradeModel, judgingBlend, nextEvent, parseWindow, fairUp, logLoss, learnOffset, selectCheckpoints, windowSlug, type Mark } from '../src/cryptomath.ts';
-import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale, livePct, dailyBet, dailyClearlyRefused, DAILY_MIN_ASK, DAILY_HARD_MAX, liveQuietHour } from '../src/fairvalue.ts';
+import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale, livePct, dailyBet, dailyClearlyRefused, DAILY_MIN_ASK, DAILY_HARD_MAX, liveQuietHour, liveAlloc } from '../src/fairvalue.ts';
 
 test('parseWindow reads series, start and end', () => {
   const w = parseWindow('cpc-btc-updown-5m-2026-11-22-1940z')!;
@@ -327,4 +327,14 @@ test('real money sits out weekdays 2-4 PM ET only', () => {
   assert.equal(liveQuietHour('Fri', 16), false);
   assert.equal(liveQuietHour('Sat', 15), false);
   assert.equal(liveQuietHour('Sun', 14), false);
+});
+
+test('LIVE_ALLOCATION: real-money bank size, Aaron sets it', () => {
+  assert.equal(liveAlloc('110', 100), 110);
+  assert.equal(liveAlloc('$110', 100), 110);
+  assert.equal(liveAlloc(undefined, 100), 100);
+  assert.equal(liveAlloc('', 100), 100);
+  assert.equal(liveAlloc('abc', 100), 100);
+  assert.equal(liveAlloc('5000', 100), 100);
+  assert.equal(liveAlloc('0', 100), 100);
 });

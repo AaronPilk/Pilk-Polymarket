@@ -60,7 +60,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DEFAULT_BLEND, SCORE_POINTS, bandOf, blendProb, eventFor, fairUp, gradeModel, judgingBlend, learnOffset, parseWindow, windowEnd, windowSlug, type Band, type Blend, type Mark } from './cryptomath';
 import { RULES, statusOf, parentOf, type Status, AT_SIZE_SQL } from './research';
-import { DAILY_HARD_MAX, DAILY_MIN_ASK, dailyBet, liveQuietHour, dailyClearlyRefused, dailyStopHit, drawdownScale, livePct, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
+import { DAILY_HARD_MAX, DAILY_MIN_ASK, dailyBet, liveAlloc, liveQuietHour, dailyClearlyRefused, dailyStopHit, drawdownScale, livePct, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
 export { livePct };
 import { BOOK_FRESH, Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
 import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
@@ -304,6 +304,7 @@ interface CryptoEnv extends Partial<PmEnv> {
   LIVE_TRADING?: string;    // "on" lets the bot place real orders with the live account (Aaron sets it)
   LIVE_STRATEGY?: string;   // which strategy trades real money (default crypto_fair_v1)
   LIVE_MAX_BET?: string;    // cap per real-money bet only (Nov 26); BOT_MAX_BET would also cap every paper account
+  LIVE_ALLOCATION?: string; // real-money only: dollars the bot treats as its own (Aaron sets it)
   LIVE_BET_PCT?: string;    // real-money cap as a % of the live account, max 10 (Nov 27)
   LIVE_DAILY_BET?: string;  // once per ET day, the first real bet is this many dollars (max 250; Polymarket's $100-trade bonus)
 }
@@ -1771,7 +1772,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     const c = this.bankCache.get(strategy);
     if (c && now - c.at < 15_000) return c.bank;
     const bank = strategy === 'live'
-      ? await bankroll(this.env.DB, this.allocation(), now, undefined, 'live')
+      ? await bankroll(this.env.DB, liveAlloc(this.env.LIVE_ALLOCATION, this.allocation()), now, undefined, 'live')
       : await bankroll(this.env.DB, BY_ID.get(strategy)?.bank ?? this.allocation(), now, strategy, 'paper', BY_ID.get(strategy)?.lock ?? 0);
     this.bankCache.set(strategy, { at: now, bank });
     return bank;

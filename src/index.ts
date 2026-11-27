@@ -1,7 +1,7 @@
 import { aggregateOrder, isApiFill, normalize, parseFill, pm, type Fill, type PmEnv, type Row } from './polymarket';
 import { recordMarkets, settleMarkets } from './recorder';
 import { bankroll } from './paper';
-import { RISK_LADDER, dailyBet, drawdownScale, riskLimits, thinLine } from './fairvalue';
+import { RISK_LADDER, dailyBet, drawdownScale, liveAlloc, riskLimits, thinLine } from './fairvalue';
 import { readiness, type ReadyRow } from './ready';
 import { RULES, board, AT_SIZE_SQL, QUICK_SQL, quickScore, type Quick } from './research';
 import { nextEvent } from './cryptomath';
@@ -28,6 +28,7 @@ interface Env extends PmEnv {
   BTC_STREAM?: string;      // "off" turns the live bitcoin streams off
   LIVE_STRATEGY?: string;   // which bitcoin strategy trades real money (default crypto_fair_v1)
   LIVE_MAX_BET?: string;    // cap per real-money bet only (Nov 26)
+  LIVE_ALLOCATION?: string; // real-money only: dollars of the account the bot treats as its own
   LIVE_BET_PCT?: string;    // real-money cap as a % of the live account, max 10 (Nov 27)
   LIVE_DAILY_BET?: string;  // once per ET day, the first real bet is this many dollars (Nov 27)
   SPORTS?: string;          // "off" puts the Sports bot to sleep (game feed, recorder, basketball paper traders); on by default
@@ -228,7 +229,7 @@ const BOOKS = { btc: 'crypto_%', sports: 'hoops_%', cricket: 'cricket_%' } as co
 type Book = keyof typeof BOOKS;
 
 async function bot(env: Env, book: Book) {
-  const allocation = Number(env.BOT_ALLOCATION || 100) || 100;
+  const allocation = Number(env.BOT_ALLOCATION || 100) || 100, baseAlloc = allocation;
   const liveOn = env.LIVE_TRADING === 'on';
   const sports = env.SPORTS !== 'off';
   const q = async <T>(sql: string, ...args: unknown[]): Promise<T[]> =>
@@ -240,6 +241,7 @@ async function bot(env: Env, book: Book) {
 
   // One account's view: open positions marked at what they'd sell for, history, totals.
   const block = async (mode: 'paper' | 'live') => {
+    const allocation = mode === 'live' ? liveAlloc(env.LIVE_ALLOCATION, baseAlloc) : baseAlloc;
     const open = await q<any>(`SELECT * FROM bot_positions WHERE mode = ? AND status = 'open'${scope} ORDER BY opened_at DESC LIMIT 250`, mode);
     const history = await q<any>(`SELECT * FROM bot_positions WHERE mode = ? AND status != 'open'${scope} ORDER BY closed_at DESC LIMIT 300`, mode);
     const totals = (await q<{ realized: number | null; n: number; wins: number; fees: number | null; staked: number | null }>(

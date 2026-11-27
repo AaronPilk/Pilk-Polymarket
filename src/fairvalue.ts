@@ -326,3 +326,12 @@ export function dailyClearlyRefused(r: { error: string | null; reject: string | 
 export function liveQuietHour(weekday: string, hourEt: number): boolean {
   return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday) && hourEt >= 14 && hourEt < 16;
 }
+
+// Real money only (Nov 27, Aaron: "the bot has $110"): LIVE_ALLOCATION is how many dollars of the Polymarket
+// account the bot treats as its own (it still only trades that plus its winnings; the rest stays Aaron's).
+// Aaron sets it; anything unset or outside $1-$1,000 falls back to BOT_ALLOCATION.
+export function liveAlloc(raw: unknown, fallback: number): number {
+  if (raw == null || String(raw).trim() === '') return fallback;
+  const v = Number(String(raw).replace('$', '').trim());
+  return v >= 1 && v <= 1000 ? v : fallback;
+}
