@@ -319,3 +319,10 @@ export function dailyClearlyRefused(r: { error: string | null; reject: string | 
   if (r.error) return /^HTTP 4\d\d/.test(r.error);
   return !(r.filled > 0);
 }
+
+// Real money only (Nov 27, Aaron spotted it): skip weekdays 2:00-4:00 PM ET, the run-up to the 4 PM New York
+// close. 3 of fav_98's 4 losses ever came in that window (35 bets there vs 1 loss in ~395 other bets), and the
+// whole favorite family loses 5.8% there vs ~1.6% at other hours. Paper keeps betting it so the test stays clean.
+export function liveQuietHour(weekday: string, hourEt: number): boolean {
+  return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(weekday) && hourEt >= 14 && hourEt < 16;
+}

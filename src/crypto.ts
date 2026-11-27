@@ -60,7 +60,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DEFAULT_BLEND, SCORE_POINTS, bandOf, blendProb, eventFor, fairUp, gradeModel, judgingBlend, learnOffset, parseWindow, windowEnd, windowSlug, type Band, type Blend, type Mark } from './cryptomath';
 import { RULES, statusOf, parentOf, type Status, AT_SIZE_SQL } from './research';
-import { DAILY_HARD_MAX, DAILY_MIN_ASK, dailyBet, dailyClearlyRefused, dailyStopHit, drawdownScale, livePct, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
+import { DAILY_HARD_MAX, DAILY_MIN_ASK, dailyBet, liveQuietHour, dailyClearlyRefused, dailyStopHit, drawdownScale, livePct, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
 export { livePct };
 import { BOOK_FRESH, Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
 import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
@@ -1474,6 +1474,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private async liveEnter(w: Win, st: CryptoStrategy, best: Cand, f: Fair, tau: number, now: number, mid: number | null) {
     const db = this.env.DB, env = this.env as PmEnv;
     const name = `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`;
+    { const et = etParts(now); if (liveQuietHour(et.wd, et.h)) return; }   // no real bets weekdays 2-4 PM ET
     const bank = await this.bank('live', now);
     if (dailyStopHit(bank.equity, bank.today, bank.peak)) return;
     const stake = stakeFor({
