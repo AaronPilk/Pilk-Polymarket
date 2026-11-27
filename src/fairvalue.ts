@@ -301,3 +301,10 @@ export function livePct(raw: unknown): number | null {
   const v = Number(String(raw).replace('%', '').trim());
   return v > 0 && v <= 10 ? v : null;
 }
+
+// LIVE_DAILY_BET in dollars, only when it reads as a number from 1 to 250.
+export function dailyBet(raw: unknown): number | null {
+  if (raw == null || String(raw).trim() === '') return null;
+  const v = Number(String(raw).replace('$', '').trim());
+  return v >= 1 && v <= 250 ? v : null;
+}

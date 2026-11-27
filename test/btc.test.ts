@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_BLEND, blendProb, eventFor, fitBlend, gradeModel, judgingBlend, nextEvent, parseWindow, fairUp, logLoss, learnOffset, selectCheckpoints, windowSlug, type Mark } from '../src/cryptomath.ts';
-import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale, livePct } from '../src/fairvalue.ts';
+import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale, livePct, dailyBet } from '../src/fairvalue.ts';
 
 test('parseWindow reads series, start and end', () => {
   const w = parseWindow('cpc-btc-updown-5m-2026-11-22-1940z')!;
@@ -300,4 +300,11 @@ test('LIVE_BET_PCT reads a percent between 0 and 10, nothing else', () => {
   assert.equal(cap(102.8, 5), 5.14);
   assert.equal(cap(400, 5), 20);
   assert.equal(cap(91, 5), 4.55);
+});
+
+test('LIVE_DAILY_BET reads dollars from 1 to 250, nothing else', () => {
+  assert.equal(dailyBet('100'), 100);
+  assert.equal(dailyBet(' $100 '), 100);
+  assert.equal(dailyBet('250'), 250);
+  for (const bad of [undefined, null, '', '0', '0.5', '-100', '251', '1000', 'hundred']) assert.equal(dailyBet(bad as any), null, String(bad));
 });

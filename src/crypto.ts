@@ -60,7 +60,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DEFAULT_BLEND, SCORE_POINTS, bandOf, blendProb, eventFor, fairUp, gradeModel, judgingBlend, learnOffset, parseWindow, windowEnd, windowSlug, type Band, type Blend, type Mark } from './cryptomath';
 import { RULES, statusOf, parentOf, type Status, AT_SIZE_SQL } from './research';
-import { dailyStopHit, drawdownScale, livePct, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
+import { dailyBet, dailyStopHit, drawdownScale, livePct, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
 export { livePct };
 import { BOOK_FRESH, Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
 import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
@@ -305,6 +305,7 @@ interface CryptoEnv extends Partial<PmEnv> {
   LIVE_STRATEGY?: string;   // which strategy trades real money (default crypto_fair_v1)
   LIVE_MAX_BET?: string;    // cap per real-money bet only (Nov 26); BOT_MAX_BET would also cap every paper account
   LIVE_BET_PCT?: string;    // real-money cap as a % of the live account, max 10 (Nov 27)
+  LIVE_DAILY_BET?: string;  // once per ET day, the first real bet is this many dollars (max 250; Polymarket's $100-trade bonus)
 }
 type Side = 'long' | 'short';
 type Src = 'stream' | 'poll';
@@ -1495,6 +1496,27 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     }
     let qty = Math.floor(stake / best.ask);
     if (cap != null) qty = Math.min(qty, Math.floor(cap / best.ask));
+    // Nov 27, Aaron: Polymarket gives $20 a day for placing a $100 trade, so once per ET day the first real
+    // bet the strategy makes is LIVE_DAILY_BET dollars instead of its usual size (never more than the live
+    // account has free, hard-limited to $250). It's marked used before the order goes in and un-marked if
+    // the order fails or doesn't fill, so it can't fire twice in a day. Unset LIVE_DAILY_BET to stop it.
+    let daily = false;
+    const rawDaily = this.env.LIVE_DAILY_BET;
+    const dailyAmt = dailyBet(rawDaily);
+    if (rawDaily != null && String(rawDaily).trim() !== '' && dailyAmt == null) {
+      this.liveEvent(now, 'error', w.slug, `${name}: LIVE_DAILY_BET is set (${JSON.stringify(rawDaily)}) but isn't dollars between 1 and 250, ignored`);
+    }
+    const today = (() => { const e = etParts(now); return `${e.y}-${e.m}-${e.d}`; })();
+    if (dailyAmt != null) {
+      const used = await db.prepare("SELECT v FROM brain WHERE k = 'live_daily_bet'").first<{ v: string }>().catch(() => null);
+      if (used?.v !== today) {
+        // At least the full amount (Polymarket's bonus wants a $100 trade), unless the account can't cover it.
+        const per = best.ask + feePer(best.ask);
+        let q2 = Math.ceil(dailyAmt / best.ask);
+        if (q2 * per > bank.available) q2 = Math.floor(bank.available / per);
+        if (q2 > qty) { qty = q2; daily = true; }
+      }
+    }
     if (qty < 1) return;   // real money: no probes
     // Never trade a window where the account holds anything, or has orders the bot didn't place:
     // those are Aaron's, and the exchange would net them against the bot's.
@@ -1510,8 +1532,13 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       if (!pv.ok) { this.livePausedUntil = now + 10 * MIN; return; }
       this.liveVerified = true;
     }
+    const markDaily = (v: string | null) => (v == null
+      ? db.prepare("DELETE FROM brain WHERE k = 'live_daily_bet'").run()
+      : db.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at').bind('live_daily_bet', v, now).run());
+    if (daily) await markDaily(today);
     const r = await placeOrder(env, spec);
     if (r.id) this.liveOrderIds.add(r.id);
+    if (daily && (r.error || r.reject || r.filled <= 0)) await markDaily(null).catch(() => null);
     if (r.error || r.reject) {
       this.liveEvent(now, 'error', w.slug, `Buy ${qty} ${name} at ${cents(best.ask)} failed: ${r.error || r.reject}`);
       if (++this.liveErrors >= 3) { this.liveErrors = 0; this.livePausedUntil = now + 15 * MIN; this.liveEvent(now, 'pause', null, 'Three order errors in a row: paused real trading for 15 minutes'); }
@@ -1523,11 +1550,11 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side, sideName: name,
       qty: r.filled, avgPx: r.avgSidePx, fee: r.fee, limitPx: best.ask, exchangeId: r.id,
       reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${leftText(tau)}`, now,
-      meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), feeds: this.feedsNow(now), equity: r2(bank.equity), asked: qty, stake: r2(stake), cap, capRaw: rawCap == null ? null : String(rawCap), pct: livePct(rawPct), rules: RULES },
+      meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), feeds: this.feedsNow(now), equity: r2(bank.equity), asked: qty, stake: r2(stake), cap, capRaw: rawCap == null ? null : String(rawCap), pct: livePct(rawPct), daily: daily ? dailyAmt : null, rules: RULES },
     });
     this.open.push(pos);
     this.bankCache.delete('live');
-    this.liveEvent(now, 'buy', w.slug, `Bought ${r.filled} ${name} at ${cents(r.avgSidePx)} for $${(r.filled * r.avgSidePx + r.fee).toFixed(2)} (fee $${r.fee.toFixed(2)}); math says ${cents(best.fair)}; cap ${cap != null ? '$' + cap : 'none'}`);
+    this.liveEvent(now, 'buy', w.slug, `${daily ? `Daily $${dailyAmt} bet (Polymarket bonus): ` : ''}Bought ${r.filled} ${name} at ${cents(r.avgSidePx)} for $${(r.filled * r.avgSidePx + r.fee).toFixed(2)} (fee $${r.fee.toFixed(2)}); math says ${cents(best.fair)}; cap ${daily ? 'daily bet' : cap != null ? '$' + cap : 'none'}`);
     // His 2x idea where this strategy uses it: a resting sell at double the fill, maker only.
     const tp = takeProfitFor(r.avgSidePx, st.tpBelow);
     if (tp != null) {

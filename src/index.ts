@@ -1,7 +1,7 @@
 import { aggregateOrder, isApiFill, normalize, parseFill, pm, type Fill, type PmEnv, type Row } from './polymarket';
 import { recordMarkets, settleMarkets } from './recorder';
 import { bankroll } from './paper';
-import { RISK_LADDER, drawdownScale, riskLimits, thinLine } from './fairvalue';
+import { RISK_LADDER, dailyBet, drawdownScale, riskLimits, thinLine } from './fairvalue';
 import { readiness, type ReadyRow } from './ready';
 import { RULES, board, AT_SIZE_SQL, QUICK_SQL, quickScore, type Quick } from './research';
 import { nextEvent } from './cryptomath';
@@ -29,6 +29,7 @@ interface Env extends PmEnv {
   LIVE_STRATEGY?: string;   // which bitcoin strategy trades real money (default crypto_fair_v1)
   LIVE_MAX_BET?: string;    // cap per real-money bet only (Nov 26)
   LIVE_BET_PCT?: string;    // real-money cap as a % of the live account, max 10 (Nov 27)
+  LIVE_DAILY_BET?: string;  // once per ET day, the first real bet is this many dollars (Nov 27)
   SPORTS?: string;          // "off" puts the Sports bot to sleep (game feed, recorder, basketball paper traders); on by default
   SPORTS_STRATEGY?: string; // which sports strategy its readiness card follows (default hoops_trailer_v1, Aaron's style)
   LIVE_TRADING?: string;    // "on" lets the bot place real orders with its live account (Aaron sets it; default off)
@@ -298,7 +299,7 @@ async function bot(env: Env, book: Book) {
         ? await q<any>(`SELECT market_slug, side, avg_entry, qty, cost, fees, pnl, status, opened_at FROM bot_positions
             WHERE mode = 'paper' AND strategy = ? AND market_slug IN (${slugs.map(() => '?').join(',')})`, liveId, ...slugs)
         : [];
-      live = { on: liveOn, strategy: liveId, maxBet: Number(env.LIVE_MAX_BET) > 0 ? Number(env.LIVE_MAX_BET) : null, betPct: livePct(env.LIVE_BET_PCT), ...acct, events, twins };
+      live = { on: liveOn, strategy: liveId, maxBet: Number(env.LIVE_MAX_BET) > 0 ? Number(env.LIVE_MAX_BET) : null, betPct: livePct(env.LIVE_BET_PCT), dailyBet: dailyBet(env.LIVE_DAILY_BET), ...acct, events, twins };
     }
     // What the bitcoin model has learned: its latest self-grading (every half hour), each
     // exchange's offset to the official index (every window start), trades the data check refused.
