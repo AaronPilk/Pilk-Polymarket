@@ -270,6 +270,7 @@ interface CryptoEnv extends Partial<PmEnv> {
   BTC_REPLICA?: string;     // "off" turns off the order books behind the index copy (shadow mode)
   LIVE_TRADING?: string;    // "on" lets the bot place real orders with the live account (Aaron sets it)
   LIVE_STRATEGY?: string;   // which strategy trades real money (default crypto_fair_v1)
+  LIVE_MAX_BET?: string;    // cap per real-money bet only (Nov 26); BOT_MAX_BET would also cap every paper account
 }
 type Side = 'long' | 'short';
 type Src = 'stream' | 'poll';
@@ -1405,7 +1406,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     if (dailyStopHit(bank.equity, bank.today, bank.peak)) return;
     const stake = stakeFor({
       fair: this.sizingProb(best, mid, tau), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
-      fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.ceiling(), recordKelly: this.records.get(parentOf(st.id) ?? st.id)?.f ?? 0,
+      fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.liveCeiling(), recordKelly: this.records.get(parentOf(st.id) ?? st.id)?.f ?? 0,
     });
     const qty = Math.floor(stake / best.ask);
     if (qty < 1) return;   // real money: no probes
@@ -1628,6 +1629,12 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
 
   private allocation() { return Number(this.env.BOT_ALLOCATION || 100) || 100; }
   private ceiling(): number | null { const v = Number(this.env.BOT_MAX_BET); return v > 0 ? v : null; }
+  // Real money only: the tighter of BOT_MAX_BET and LIVE_MAX_BET, so a first live run can bet small
+  // without capping the paper accounts the 10-day test is measuring.
+  private liveCeiling(): number | null {
+    const caps = [this.ceiling(), Number(this.env.LIVE_MAX_BET) > 0 ? Number(this.env.LIVE_MAX_BET) : null].filter((x): x is number => x != null);
+    return caps.length ? Math.min(...caps) : null;
+  }
 
   private async bank(strategy: string, now: number): Promise<Bankroll> {
     const c = this.bankCache.get(strategy);
