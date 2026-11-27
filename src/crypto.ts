@@ -266,6 +266,10 @@ export const COMBOS: Combo[] = [
   { id: 'crypto_combo_10', gated: true, proven: 0.10, other: 0.05, openCap: 0.30 },
   { id: 'crypto_combo_15', gated: true, proven: 0.15, other: 0.075, openCap: 0.45 },
   { id: 'crypto_combo_allin', gated: true, provenOnly: true, proven: 1, other: 0, openCap: 1, ladder: [[200, 1], [400, 0.5], [800, 0.25], [1600, 0.1], [Infinity, 0.05]] },
+  // Nov 27, Aaron ("the perfect formula: fastest growth with minimal risk"): the ladder the Monte Carlo liked best,
+  // 25% a bet under $200, then 13% (half the Kelly bet at the loss rate fav_98 is 80% sure to be under) to $400,
+  // 8% to $2,000, then 5%. claude/bigger-bets-test.md has the comparison.
+  { id: 'crypto_combo_ladder', gated: true, provenOnly: true, proven: 1, other: 0, openCap: 1, ladder: [[200, 0.25], [400, 0.13], [2000, 0.08], [Infinity, 0.05]] },
 ];
 export const COMBO_RULES = { favUnder: 0.975, dayFrom: 8, dayTo: 16 };
 
