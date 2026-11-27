@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_BLEND, blendProb, eventFor, fitBlend, gradeModel, judgingBlend, nextEvent, parseWindow, fairUp, logLoss, learnOffset, selectCheckpoints, windowSlug, type Mark } from '../src/cryptomath.ts';
-import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale, livePct, dailyBet, dailyClearlyRefused, DAILY_MIN_ASK, DAILY_HARD_MAX, liveQuietHour, liveAlloc } from '../src/fairvalue.ts';
+import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale, livePct, dailyBet, dailyClearlyRefused, DAILY_MIN_ASK, DAILY_HARD_MAX, liveQuietHour, liveAlloc, liveFloorStake } from '../src/fairvalue.ts';
 
 test('parseWindow reads series, start and end', () => {
   const w = parseWindow('cpc-btc-updown-5m-2026-11-22-1940z')!;
@@ -337,4 +337,14 @@ test('LIVE_ALLOCATION: real-money bank size, Aaron sets it', () => {
   assert.equal(liveAlloc('abc', 100), 100);
   assert.equal(liveAlloc('5000', 100), 100);
   assert.equal(liveAlloc('0', 100), 100);
+});
+
+test('real money keeps its capped size after one loss while the record still makes money', () => {
+  const base = { stake: 0, ceiling: 5.46, recordMean: 0.0069, recordN: 399, available: 109, openRoom: 30 };
+  assert.equal(liveFloorStake(base), 5.46);
+  assert.equal(liveFloorStake({ ...base, stake: 3 }), 3);
+  assert.equal(liveFloorStake({ ...base, recordMean: -0.001 }), 0);
+  assert.equal(liveFloorStake({ ...base, recordN: 50 }), 0);
+  assert.equal(liveFloorStake({ ...base, ceiling: null }), 0);
+  assert.equal(liveFloorStake({ ...base, available: 2 }), 2);
 });

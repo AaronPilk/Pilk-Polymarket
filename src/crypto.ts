@@ -60,10 +60,10 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DEFAULT_BLEND, SCORE_POINTS, bandOf, blendProb, eventFor, fairUp, gradeModel, judgingBlend, learnOffset, parseWindow, windowEnd, windowSlug, type Band, type Blend, type Mark } from './cryptomath';
 import { RULES, statusOf, parentOf, type Status, AT_SIZE_SQL } from './research';
-import { DAILY_HARD_MAX, DAILY_MIN_ASK, dailyBet, liveAlloc, liveQuietHour, dailyClearlyRefused, dailyStopHit, drawdownScale, livePct, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
+import { DAILY_HARD_MAX, DAILY_MIN_ASK, dailyBet, liveAlloc, liveFloorStake, liveQuietHour, LIVE_LOSSES_PER_DAY, dailyClearlyRefused, dailyStopHit, drawdownScale, livePct, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
 export { livePct };
 import { BOOK_FRESH, Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
-import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
+import { bankroll, startOfDayET, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
 import { signedHeaders, type PmEnv } from './polymarket';
 import { accountPosition, cancelOrder, getOrder, openOrders, placeOrder, previewOrder, type OrderSpec } from './orders';
 import { SEC_BUFFER, SEC_DDL, SEC_KEEP_DAYS, SEC_SERIES, secInserts, type SecRow } from './seconds';
@@ -1478,7 +1478,9 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     { const et = etParts(now); if (liveQuietHour(et.wd, et.h)) { this.liveNote(now, w.slug, `${name} at ${cents(best.ask)}: no real bet, weekdays 2-4 PM ET are off`); return; } }
     const bank = await this.bank('live', now);
     if (dailyStopHit(bank.equity, bank.today, bank.peak)) { this.liveNote(now, w.slug, `${name}: no real bet, today's loss limit is hit`); return; }
-    const stake = stakeFor({
+    const lossesToday = (await db.prepare("SELECT COUNT(*) AS n FROM bot_positions WHERE mode = 'live' AND pnl < 0 AND closed_at >= ?").bind(startOfDayET(now)).first<{ n: number }>().catch(() => null))?.n;
+    if (lossesToday == null || lossesToday >= LIVE_LOSSES_PER_DAY) { this.liveNote(now, w.slug, `${name}: no real bet, ${lossesToday == null ? "couldn't count today's losses" : `${lossesToday} real losses today, done until tomorrow`}`); return; }
+    let stake = stakeFor({
       fair: this.sizingProb(best, mid, tau), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
       fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.liveCeiling(bank.equity), recordKelly: this.records.get(parentOf(st.id) ?? st.id)?.f ?? 0,
     });
@@ -1486,6 +1488,10 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     // count, and if a cap is set but can't be read the bot skips the bet instead of betting full size
     // (Nov 26: the first real bet came out at $9.82 with LIVE_MAX_BET = 3).
     const cap = this.liveCeiling(bank.equity);
+    const rec = this.records.get(parentOf(st.id) ?? st.id);
+    const recordSized = stake > 0;
+    stake = liveFloorStake({ stake, ceiling: cap, recordMean: rec?.mean ?? null, recordN: rec?.n ?? 0, available: bank.available,
+      openRoom: Math.max(0, bank.equity * riskLimits(bank.peak).open - bank.openNet) });
     const rawCap = (this.env as any).LIVE_MAX_BET;
     if (rawCap != null && String(rawCap).trim() !== '' && !(Number(rawCap) > 0)) {
       this.liveEvent(now, 'error', w.slug, `${name}: LIVE_MAX_BET is set (${JSON.stringify(rawCap)}) but couldn't be read as dollars, skipped`);
@@ -1566,7 +1572,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side, sideName: name,
       qty: r.filled, avgPx: r.avgSidePx, fee: r.fee, limitPx: best.ask, exchangeId: r.id,
       reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${leftText(tau)}`, now,
-      meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), feeds: this.feedsNow(now), equity: r2(bank.equity), asked: qty, stake: r2(stake), cap, capRaw: rawCap == null ? null : String(rawCap), pct: livePct(rawPct), daily: daily ? dailyAmt : null, rules: RULES },
+      meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), feeds: this.feedsNow(now), equity: r2(bank.equity), asked: qty, stake: r2(stake), cap, capRaw: rawCap == null ? null : String(rawCap), pct: livePct(rawPct), daily: daily ? dailyAmt : null, sizing: recordSized ? 'record' : 'floor', rules: RULES },
     });
     this.open.push(pos);
     this.bankCache.delete('live');

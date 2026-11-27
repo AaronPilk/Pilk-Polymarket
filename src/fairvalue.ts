@@ -335,3 +335,18 @@ export function liveAlloc(raw: unknown, fallback: number): number {
   const v = Number(String(raw).replace('$', '').trim());
   return v >= 1 && v <= 1000 ? v : fallback;
 }
+
+// Real money, Nov 27 (Aaron: "just because it loses once it doesn't just immediately stop trading for two
+// whole days"). The record-based size drops to $0 when one more loss would erase the measured edge, which a
+// single loss at 98¢ does. So while the strategy is still making money overall on enough bets, real money
+// keeps betting its capped size (the 5% / LIVE_MAX_BET ceiling). It stops only when the record is actually
+// losing money, or after LIVE_LOSSES_PER_DAY real losses in one ET day.
+export const LIVE_FLOOR_MIN_BETS = 100;
+export const LIVE_LOSSES_PER_DAY = 2;
+export function liveFloorStake(o: { stake: number; ceiling: number | null; recordMean: number | null; recordN: number;
+  available: number; openRoom: number }): number {
+  if (o.stake > 0) return o.stake;
+  if (o.ceiling == null || !(o.ceiling > 0)) return 0;
+  if (!(o.recordMean != null && o.recordMean > 0) || o.recordN < LIVE_FLOOR_MIN_BETS) return 0;
+  return Math.max(0, Math.min(o.ceiling, o.available, o.openRoom));
+}
