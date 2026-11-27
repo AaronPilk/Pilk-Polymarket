@@ -1475,9 +1475,9 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private async liveEnter(w: Win, st: CryptoStrategy, best: Cand, f: Fair, tau: number, now: number, mid: number | null) {
     const db = this.env.DB, env = this.env as PmEnv;
     const name = `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`;
-    { const et = etParts(now); if (liveQuietHour(et.wd, et.h)) return; }   // no real bets weekdays 2-4 PM ET
+    { const et = etParts(now); if (liveQuietHour(et.wd, et.h)) { this.liveNote(now, w.slug, `${name} at ${cents(best.ask)}: no real bet, weekdays 2-4 PM ET are off`); return; } }
     const bank = await this.bank('live', now);
-    if (dailyStopHit(bank.equity, bank.today, bank.peak)) return;
+    if (dailyStopHit(bank.equity, bank.today, bank.peak)) { this.liveNote(now, w.slug, `${name}: no real bet, today's loss limit is hit`); return; }
     const stake = stakeFor({
       fair: this.sizingProb(best, mid, tau), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
       fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.liveCeiling(bank.equity), recordKelly: this.records.get(parentOf(st.id) ?? st.id)?.f ?? 0,
@@ -1526,7 +1526,10 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       if (q2 * best.ask > DAILY_HARD_MAX) q2 = Math.floor(DAILY_HARD_MAX / best.ask);
       if (q2 > qty) dailyQty = q2;
     }
-    if (Math.max(qty, dailyQty) < 1) return;   // real money: no probes
+    if (Math.max(qty, dailyQty) < 1) {   // real money: no probes
+      this.liveNote(now, w.slug, `${name} at ${cents(best.ask)}: no real bet. Sized to $0 (record share ${this.records.get(parentOf(st.id) ?? st.id)?.f ?? 0}, stake $${stake.toFixed(2)}); daily bet ${dailyAmt == null ? 'off' : best.ask < DAILY_MIN_ASK ? 'needs 98¢+' : `wanted ${dailyQty} with $${bank.available.toFixed(2)} free`}`);
+      return;
+    }
     // Never trade a window where the account holds anything, or has orders the bot didn't place:
     // those are Aaron's, and the exchange would net them against the bot's.
     const [held, orders] = await Promise.all([accountPosition(env, w.slug), openOrders(env, w.slug)]);
@@ -1541,7 +1544,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       const claim = await markDaily(today).catch(() => null);
       if (claim?.meta?.changes === 1) { qty = dailyQty; daily = true; }
     }
-    if (qty < 1) return;
+    if (qty < 1) { this.liveNote(now, w.slug, `${name}: no real bet. Sized to $0 and today's daily bet is already used (${today})`); return; }
     const spec: OrderSpec = { slug: w.slug, side: best.side, action: 'buy', sidePx: best.ask, qty, tif: 'ioc' };
     if (!this.liveVerified) {
       const pv = await previewOrder(env, spec);
@@ -1780,6 +1783,16 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
 
   private liveOn() { return this.env.LIVE_TRADING === 'on' && !!this.env.POLYMARKET_KEY_ID && !!this.env.POLYMARKET_SECRET_KEY; }
   private liveStrategy() { return this.env.LIVE_STRATEGY || 'crypto_fair_v1'; }
+
+  // One 'skip' note per window when real money passes on a bet the strategy took on paper, so a quiet
+  // live account can always be explained (Nov 27: fav_98's record share fell to 0 after its loss).
+  private liveNoted = new Set<string>();
+  private liveNote(now: number, slug: string, detail: string) {
+    if (this.liveNoted.has(slug)) return;
+    this.liveNoted.add(slug);
+    if (this.liveNoted.size > 500) this.liveNoted.clear();
+    this.liveEvent(now, 'skip', slug, detail);
+  }
 
   private liveEvent(now: number, kind: string, slug: string | null, detail: string) {
     this.pendingStmts.push(this.env.DB.prepare('INSERT INTO live_events (ts, kind, slug, detail) VALUES (?,?,?,?)').bind(now, kind, slug, detail.slice(0, 500)));
