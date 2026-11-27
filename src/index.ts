@@ -12,7 +12,7 @@ export { CricketFeed } from './cricket';
 export { BookFeed } from './books';
 import { CRICKET_IDS } from './cricket';
 import { HOOPS_IDS } from './live';
-import { CRYPTO_IDS } from './crypto';
+import { CRYPTO_IDS, livePct } from './crypto';
 
 interface Env extends PmEnv {
   DB: D1Database;
@@ -28,6 +28,7 @@ interface Env extends PmEnv {
   BTC_STREAM?: string;      // "off" turns the live bitcoin streams off
   LIVE_STRATEGY?: string;   // which bitcoin strategy trades real money (default crypto_fair_v1)
   LIVE_MAX_BET?: string;    // cap per real-money bet only (Nov 26)
+  LIVE_BET_PCT?: string;    // real-money cap as a % of the live account, max 10 (Nov 27)
   SPORTS?: string;          // "off" puts the Sports bot to sleep (game feed, recorder, basketball paper traders); on by default
   SPORTS_STRATEGY?: string; // which sports strategy its readiness card follows (default hoops_trailer_v1, Aaron's style)
   LIVE_TRADING?: string;    // "on" lets the bot place real orders with its live account (Aaron sets it; default off)
@@ -294,7 +295,7 @@ async function bot(env: Env, book: Book) {
         ? await q<any>(`SELECT market_slug, side, avg_entry, qty, cost, fees, pnl, status, opened_at FROM bot_positions
             WHERE mode = 'paper' AND strategy = ? AND market_slug IN (${slugs.map(() => '?').join(',')})`, liveId, ...slugs)
         : [];
-      live = { on: liveOn, strategy: liveId, maxBet: Number(env.LIVE_MAX_BET) > 0 ? Number(env.LIVE_MAX_BET) : null, ...acct, events, twins };
+      live = { on: liveOn, strategy: liveId, maxBet: Number(env.LIVE_MAX_BET) > 0 ? Number(env.LIVE_MAX_BET) : null, betPct: livePct(env.LIVE_BET_PCT), ...acct, events, twins };
     }
     // What the bitcoin model has learned: its latest self-grading (every half hour), each
     // exchange's offset to the official index (every window start), trades the data check refused.

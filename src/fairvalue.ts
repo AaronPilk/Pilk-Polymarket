@@ -294,3 +294,10 @@ export function thinLine(pts: [number, number][], chunks: number): [number, numb
   if (out.at(-1) !== pts.at(-1)) out.push(pts.at(-1)!);
   return out;
 }
+
+// LIVE_BET_PCT as a percent (5 means 5%), only when it reads as a number above 0 and at most 10.
+export function livePct(raw: unknown): number | null {
+  if (raw == null || String(raw).trim() === '') return null;
+  const v = Number(String(raw).replace('%', '').trim());
+  return v > 0 && v <= 10 ? v : null;
+}

@@ -60,7 +60,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DEFAULT_BLEND, SCORE_POINTS, bandOf, blendProb, eventFor, fairUp, gradeModel, judgingBlend, learnOffset, parseWindow, windowEnd, windowSlug, type Band, type Blend, type Mark } from './cryptomath';
 import { RULES, statusOf, parentOf, type Status, AT_SIZE_SQL } from './research';
-import { dailyStopHit, drawdownScale, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
+import { dailyStopHit, drawdownScale, livePct, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
+export { livePct };
 import { BOOK_FRESH, Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
 import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
 import { signedHeaders, type PmEnv } from './polymarket';
@@ -271,6 +272,7 @@ interface CryptoEnv extends Partial<PmEnv> {
   LIVE_TRADING?: string;    // "on" lets the bot place real orders with the live account (Aaron sets it)
   LIVE_STRATEGY?: string;   // which strategy trades real money (default crypto_fair_v1)
   LIVE_MAX_BET?: string;    // cap per real-money bet only (Nov 26); BOT_MAX_BET would also cap every paper account
+  LIVE_BET_PCT?: string;    // real-money cap as a % of the live account, max 10 (Nov 27)
 }
 type Side = 'long' | 'short';
 type Src = 'stream' | 'poll';
@@ -1406,15 +1408,20 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     if (dailyStopHit(bank.equity, bank.today, bank.peak)) return;
     const stake = stakeFor({
       fair: this.sizingProb(best, mid, tau), price: best.ask, equity: bank.equity, available: bank.available, peak: bank.peak, openNet: bank.openNet,
-      fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.liveCeiling(), recordKelly: this.records.get(parentOf(st.id) ?? st.id)?.f ?? 0,
+      fraction: st.kelly?.fraction, trust: 1, depth: best.depth, ceiling: this.liveCeiling(bank.equity), recordKelly: this.records.get(parentOf(st.id) ?? st.id)?.f ?? 0,
     });
     // Aaron's real-money cap, checked twice: once inside stakeFor and again here on the contract
     // count, and if a cap is set but can't be read the bot skips the bet instead of betting full size
     // (Nov 26: the first real bet came out at $9.82 with LIVE_MAX_BET = 3).
-    const cap = this.liveCeiling();
+    const cap = this.liveCeiling(bank.equity);
     const rawCap = (this.env as any).LIVE_MAX_BET;
-    if (rawCap != null && String(rawCap).trim() !== '' && cap == null) {
+    if (rawCap != null && String(rawCap).trim() !== '' && !(Number(rawCap) > 0)) {
       this.liveEvent(now, 'error', w.slug, `${name}: LIVE_MAX_BET is set (${JSON.stringify(rawCap)}) but couldn't be read as dollars, skipped`);
+      return;
+    }
+    const rawPct = this.env.LIVE_BET_PCT;
+    if (rawPct != null && String(rawPct).trim() !== '' && livePct(rawPct) == null) {
+      this.liveEvent(now, 'error', w.slug, `${name}: LIVE_BET_PCT is set (${JSON.stringify(rawPct)}) but isn't a percent between 0 and 10, skipped`);
       return;
     }
     let qty = Math.floor(stake / best.ask);
@@ -1447,7 +1454,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       strategy: st.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side, sideName: name,
       qty: r.filled, avgPx: r.avgSidePx, fee: r.fee, limitPx: best.ask, exchangeId: r.id,
       reason: `fair ${cents(best.fair)} vs ask ${cents(best.ask)}, ${leftText(tau)}`, now,
-      meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), feeds: this.feedsNow(now), equity: r2(bank.equity), asked: qty, stake: r2(stake), cap, capRaw: rawCap == null ? null : String(rawCap), rules: RULES },
+      meta: { fair: r4(best.fair), edge: r4(best.edge), spot: r2(f.spot), strike: r2(f.strike), tau: Math.round(tau), sigma: f.sigma, mult: this.mult, band: bandOf(tau), blend: this.blends[bandOf(tau)], p: r4(this.sizingProb(best, mid, tau)), feeds: this.feedsNow(now), equity: r2(bank.equity), asked: qty, stake: r2(stake), cap, capRaw: rawCap == null ? null : String(rawCap), pct: livePct(rawPct), rules: RULES },
     });
     this.open.push(pos);
     this.bankCache.delete('live');
@@ -1641,8 +1648,14 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private ceiling(): number | null { const v = Number(this.env.BOT_MAX_BET); return v > 0 ? v : null; }
   // Real money only: the tighter of BOT_MAX_BET and LIVE_MAX_BET, so a first live run can bet small
   // without capping the paper accounts the 10-day test is measuring.
-  private liveCeiling(): number | null {
-    const caps = [this.ceiling(), Number(this.env.LIVE_MAX_BET) > 0 ? Number(this.env.LIVE_MAX_BET) : null].filter((x): x is number => x != null);
+  // Nov 27 (Aaron: "as the account grows the max bet would have to grow with it"): LIVE_BET_PCT makes the
+  // real-money cap a share of the live account (allocation plus what it has won or lost), so bets grow
+  // as it grows and shrink after a loss. Hard-limited to 10% whatever the setting. LIVE_MAX_BET, when
+  // set, stays a dollar ceiling over it.
+  private liveCeiling(equity?: number): number | null {
+    const pct = livePct(this.env.LIVE_BET_PCT);
+    const fromPct = pct != null && equity != null && equity > 0 ? Math.floor(equity * pct) / 100 : null;
+    const caps = [this.ceiling(), Number(this.env.LIVE_MAX_BET) > 0 ? Number(this.env.LIVE_MAX_BET) : null, fromPct].filter((x): x is number => x != null);
     return caps.length ? Math.min(...caps) : null;
   }
 
@@ -1911,3 +1924,4 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
 // Exported for tests.
 export const _strategies = CRYPTO_STRATEGIES;
 export { parseWindow };
+

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_BLEND, blendProb, eventFor, fitBlend, gradeModel, judgingBlend, nextEvent, parseWindow, fairUp, logLoss, learnOffset, selectCheckpoints, windowSlug, type Mark } from '../src/cryptomath.ts';
-import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale } from '../src/fairvalue.ts';
+import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale, livePct } from '../src/fairvalue.ts';
 
 test('parseWindow reads series, start and end', () => {
   const w = parseWindow('cpc-btc-updown-5m-2026-11-22-1940z')!;
@@ -287,4 +287,17 @@ test('checkpoints are filed by the moment they stand for, not the exact second o
   const g = gradeModel(marks);
   assert.equal(g.bands.early.windows, 120);
   assert.equal(g.bands.late.windows, 120);
+});
+
+test('LIVE_BET_PCT reads a percent between 0 and 10, nothing else', () => {
+  assert.equal(livePct('5'), 5);
+  assert.equal(livePct(' 5% '), 5);
+  assert.equal(livePct('2.5'), 2.5);
+  assert.equal(livePct('10'), 10);
+  for (const bad of [undefined, null, '', '0', '-3', '11', '50', 'five', '0.05x']) assert.equal(livePct(bad as any), null, String(bad));
+  // the cap it gives: 5% of $102.80 is $5.14, of $400 is $20, of $91 after a loss is $4.55
+  const cap = (eq: number, pct: number) => Math.floor(eq * pct) / 100;
+  assert.equal(cap(102.8, 5), 5.14);
+  assert.equal(cap(400, 5), 20);
+  assert.equal(cap(91, 5), 4.55);
 });
