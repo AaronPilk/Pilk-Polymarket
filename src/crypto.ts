@@ -255,12 +255,17 @@ export const CRYPTO_IDS = [...CRYPTO_STRATEGIES.map((s) => s.id), 'crypto_ladder
 // accounts on the proven + promising strategies, betting 10% and 15% of the account on a proven strategy
 // (half that on a promising one) with the open cap at three bets' worth. Same one-bet-per-window and
 // daytime rules. They show what bigger bets do to growth and to the drops, on paper only.
-export interface Combo { id: string; gated: boolean; proven: number; other: number; openCap: number }
+// Nov 27, Aaron ("what if every bet was the whole account until it doubles, then $50 a bet, and keep sliding the
+// risk down as it grows?"): crypto_combo_allin copies only proven strategies, betting the share of the account
+// its ladder gives for the current balance (all of it under $200, half to $400, a quarter to $800, 10% to
+// $1,600, 5% after), one bet at a time. Paper only: one loss under $200 empties it, which is the point of testing it.
+export interface Combo { id: string; gated: boolean; proven: number; other: number; openCap: number; provenOnly?: boolean; ladder?: [number, number][] }
 export const COMBOS: Combo[] = [
   { id: 'crypto_combo', gated: true, proven: 0.05, other: 0.02, openCap: 0.15 },
   { id: 'crypto_combo_wide', gated: false, proven: 0.05, other: 0.02, openCap: 0.15 },
   { id: 'crypto_combo_10', gated: true, proven: 0.10, other: 0.05, openCap: 0.30 },
   { id: 'crypto_combo_15', gated: true, proven: 0.15, other: 0.075, openCap: 0.45 },
+  { id: 'crypto_combo_allin', gated: true, provenOnly: true, proven: 1, other: 0, openCap: 1, ladder: [[200, 1], [400, 0.5], [800, 0.25], [1600, 0.1], [Infinity, 0.05]] },
 ];
 export const COMBO_RULES = { favUnder: 0.975, dayFrom: 8, dayTo: 16 };
 
@@ -1427,6 +1432,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   private async comboEnter(c: Combo, st: CryptoStrategy, status: Status, w: Win, best: Cand, tau: number, now: number) {
     try {
       if (c.gated && status !== 'proven' && status !== 'promising') return;
+      if (c.provenOnly && status !== 'proven') return;
       if (st.fav && best.ask < COMBO_RULES.favUnder) {
         const h = etParts(now).h;
         if (h >= COMBO_RULES.dayFrom && h < COMBO_RULES.dayTo) return;
@@ -1437,8 +1443,10 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       if (had) return;
       const bank = await this.bank(c.id, now);
       if (!(bank.equity > 0) || dailyStopHit(bank.equity, bank.today, bank.peak)) return;
-      const frac = status === 'proven' ? c.proven : c.other;
-      let stake = Math.min(bank.equity * frac, bank.available, Math.max(0, bank.equity * c.openCap - bank.openNet));
+      const frac = c.ladder ? (c.ladder.find(([upTo]) => bank.equity < upTo)?.[1] ?? 0) : status === 'proven' ? c.proven : c.other;
+      const cap = c.ladder ? frac : c.openCap;
+      if (c.ladder && bank.openNet > 0.005) return;   // one bet at a time
+      let stake = Math.min(bank.equity * frac, bank.available, Math.max(0, bank.equity * cap - bank.openNet));
       if (best.depth != null && best.depth > 0) stake = Math.min(stake, best.depth * best.ask * 0.25);
       const qty = Math.floor(stake / (best.ask + feePer(best.ask)));
       if (qty < 1) return;

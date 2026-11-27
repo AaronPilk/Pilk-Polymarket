@@ -507,12 +507,14 @@ const COMBO_LABEL = {
   crypto_combo_wide: 'Every running strategy, one account',
   crypto_combo_10: 'Proven + promising, bigger bets (10%)',
   crypto_combo_15: 'Proven + promising, biggest bets (15%)',
+  crypto_combo_allin: 'All in, then a sliding scale',
 };
 const COMBO_SUB = {
   crypto_combo: 'Copies only proven (5% a bet) and promising (2%) strategies. The template for real money.',
   crypto_combo_wide: 'Copies every running Bitcoin strategy: proven at 5%, the rest at 2%.',
   crypto_combo_10: 'Same strategies as the first, but 10% of the account on proven and 5% on promising, up to 30% open. Grows faster, drops harder.',
   crypto_combo_15: '15% of the account on proven and 7.5% on promising, up to 45% open. The aggressive test: one loss costs 15%.',
+  crypto_combo_allin: 'Proven strategies only, one bet at a time: the whole account until $200, then half until $400, a quarter until $800, 10% until $1,600, then 5%. One loss under $200 empties it.',
 };
 const STRATEGY_LABEL = {
   // Nov 25: the Cricket bot (src/cricket.ts)
