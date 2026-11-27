@@ -239,8 +239,8 @@ async function bot(env: Env, book: Book) {
 
   // One account's view: open positions marked at what they'd sell for, history, totals.
   const block = async (mode: 'paper' | 'live') => {
-    const open = await q<any>(`SELECT * FROM bot_positions WHERE mode = ? AND status = 'open'${scope} ORDER BY opened_at DESC LIMIT 50`, mode);
-    const history = await q<any>(`SELECT * FROM bot_positions WHERE mode = ? AND status != 'open'${scope} ORDER BY closed_at DESC LIMIT 100`, mode);
+    const open = await q<any>(`SELECT * FROM bot_positions WHERE mode = ? AND status = 'open'${scope} ORDER BY opened_at DESC LIMIT 250`, mode);
+    const history = await q<any>(`SELECT * FROM bot_positions WHERE mode = ? AND status != 'open'${scope} ORDER BY closed_at DESC LIMIT 300`, mode);
     const totals = (await q<{ realized: number | null; n: number; wins: number; fees: number | null; staked: number | null }>(
       `SELECT SUM(pnl) AS realized, COUNT(*) AS n, SUM(pnl > 0) AS wins, SUM(fees) AS fees, SUM(cost) AS staked FROM bot_positions WHERE mode = ? AND status != 'open'${scope}${no1k}`, mode))[0];
     let unrealized = 0, atRisk = 0;
@@ -253,8 +253,11 @@ async function bot(env: Env, book: Book) {
       const value = exit != null ? exit * (p.qty || 0) : null;
       const netIn = (p.cost || 0) - (p.proceeds || 0);
       const upnl = value != null ? value - netIn : null;
-      if (upnl != null) unrealized += upnl;
-      atRisk += Math.max(0, netIn);
+      // Nov 27: the totals count the $100 accounts only, like the record above; the bigger copies'
+      // open bets are still listed for their own rows on the strategy cards.
+      const isCopy = /_(1k|5k|10k)$/.test(String(p.strategy || ''));
+      if (!isCopy && upnl != null) unrealized += upnl;
+      if (!isCopy) atRisk += Math.max(0, netIn);
       const orders = await q<any>('SELECT ts, action, price, qty, filled_qty, avg_fill, fee, status, reason, exchange_order_id FROM bot_orders WHERE position_id = ? ORDER BY ts', p.id);
       positions.push({ ...p, price: exit, priceAt: t?.ts ?? null, value, upnl, orders });
     }
@@ -371,7 +374,7 @@ async function bot(env: Env, book: Book) {
       FROM bot_positions WHERE mode = 'paper' AND status != 'open' AND strategy LIKE ?${no1k}`, BOOKS[k]))[0] || {};
     const best = (await q<any>(`SELECT strategy, SUM(pnl) AS pnl, SUM(cost) AS staked FROM bot_positions
       WHERE mode = 'paper' AND status != 'open' AND strategy LIKE ?${no1k} GROUP BY strategy ORDER BY SUM(pnl) DESC LIMIT 1`, BOOKS[k]))[0] || null;
-    const open = (await q<{ n: number }>(`SELECT COUNT(*) AS n FROM bot_positions WHERE mode = 'paper' AND status = 'open' AND strategy LIKE ?`, BOOKS[k]))[0]?.n || 0;
+    const open = (await q<{ n: number }>(`SELECT COUNT(*) AS n FROM bot_positions WHERE mode = 'paper' AND status = 'open' AND strategy LIKE ?${no1k}`, BOOKS[k]))[0]?.n || 0;
     compare[k] = {
       closed: r.n || 0, wins: r.wins || 0, pnl: r.pnl || 0, staked: r.staked || 0, roi: r.staked ? r.pnl / r.staked : null,
       strategies: r.strategies || 0, markets: r.markets || 0, open, since: r.since || null, best,

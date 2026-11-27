@@ -608,7 +608,8 @@ async function loadCurve(range, mode) {
 }
 // Each bot shows only its own book: the Bitcoin bot's paper lineup (and real money once it trades),
 // or the Sports bot's paper lineup. They're never added together.
-const botGroups = (b) => (store.botBook === 'live' ? ['live'] : b?.book === 'sports' ? ['hoops'] : b?.book === 'cricket' ? ['cricket'] : [...(b?.live ? ['live'] : []), 'btc']);
+// Nov 27: real money has its own Live $ tab, so the Bitcoin tab shows the paper strategies only.
+const botGroups = (b) => (store.botBook === 'live' ? ['live'] : b?.book === 'sports' ? ['hoops'] : b?.book === 'cricket' ? ['cricket'] : ['btc']);
 // Nov 25: one card per strategy with its $100 / $1K / $5K / $10K accounts inside it, and the headline number counts
 // only the $100 accounts of strategies still running (retired ones are listed apart, never mixed in).
 // A bigger copy's own strategy: crypto_fav_99_1m_10k -> crypto_fav_99_1m; model value's copies drop the _v1
@@ -649,7 +650,7 @@ async function refreshBot({ curve = false } = {}) {
     const closedChanged = !!prev && (b.record?.closed !== prev.record?.closed || b.live?.record?.closed !== prev.live?.record?.closed);
     store.bot = b;
     if (book === 'live') { store.botGroup = 'live'; store.botGroupSet = true; }
-    else if (!store.botGroupSet || !botGroups(b).includes(store.botGroup)) { store.botGroup = b.book === 'sports' ? 'hoops' : b.book === 'cricket' ? 'cricket' : b.live ? 'live' : 'btc'; store.botGroupSet = true; }
+    else if (!store.botGroupSet || !botGroups(b).includes(store.botGroup)) { store.botGroup = b.book === 'sports' ? 'hoops' : b.book === 'cricket' ? 'cricket' : 'btc'; store.botGroupSet = true; }
     const need = [['paper', store.botRange], ...(b.live ? [['live', store.botRange]] : [])];
     await Promise.all(need.map(([mode, range]) => {
       const c = store.botCurve[curveKey(mode, range)];
@@ -1121,10 +1122,11 @@ function quickLine(q) {
 // Where things stand, in plain words: the board's verdicts for this bot and how to read the page.
 function standCard(b) {
   const book = b.book || 'btc', group = BOOK_GROUP[book];
-  const rows = b.lab?.strategies ? Object.entries(b.lab.strategies).filter(([id]) => STRATEGY_LABEL[id] && bookOf(id) === book) : [];
+  // One entry per strategy: the $1K/$5K/$10K copies share its verdict and aren't counted again (Nov 27).
+  const rows = b.lab?.strategies ? Object.entries(b.lab.strategies).filter(([id]) => STRATEGY_LABEL[id] && !is1k(id) && bookOf(id) === book) : [];
   const of = (k) => rows.filter(([, v]) => v.status === k).sort((x, y) => (y[1].n || 0) - (x[1].n || 0));
   const proven = of('proven'), promising = of('promising'), testing = of('testing'), retired = of('retired');
-  const list = (xs, withN) => xs.map(([id, v]) => `${esc(variantOf(id))}${withN ? ` <span class="faint">(${v.n || 0} bet${v.n === 1 ? '' : 's'})</span>` : ''}`).join(' · ');
+  const list = (xs, withN) => xs.map(([id, v]) => `${esc(variantOf(id))}${withN ? ` <span class="faint">(${v.n || 0} bet${v.n === 1 ? '' : 's'})</span>` : ''}${b.live?.on && b.live.strategy === id ? ' <span class="pill won">Real money</span>' : ''}`).join(' · ');
   const head = !rows.length ? 'The board hasn’t judged anything yet. First verdicts come within 5 minutes.'
     : proven.length ? `${proven.length} proven: ${proven.length === 1 ? 'it makes' : 'they make'} money beyond luck.`
     : promising.length ? `Nothing proven yet. ${promising.length} ${promising.length === 1 ? 'looks' : 'look'} good so far.`
@@ -1132,20 +1134,20 @@ function standCard(b) {
   const line = (k, xs, text, withN) => (xs.length ? `<div class="row"><div class="row-main"><div class="row-title"><span class="pill ${STATUS_PILL[k][0]}">${STATUS_PILL[k][1]}</span> ${xs.length}</div><div class="row-sub wrap">${list(xs, withN)}. ${text}</div></div></div>` : '');
   return `<div class="card stand">
     <div class="row"><div class="row-main"><div class="row-title">${head}</div></div></div>
-    ${line('proven', proven, 'Ahead beyond luck: these bet full size on paper and are the ones that could get real money. That switch is yours.', true)}
+    ${line('proven', proven, 'Ahead beyond luck: these bet full size on paper and are the ones that can trade real money. Which one does is your switch in Cloudflare.', true)}
     ${line('promising', promising, 'Ahead even in the worst case, so they bet normal size on paper. Not proven yet.', true)}
     ${line('testing', testing, '3% of its paper account a bet until there are enough bets to tell skill from luck.', true)}
     ${line('retired', retired, 'Stopped: they lost money or showed no edge after fees, and don’t bet anymore.', false)}
-    <div class="row-sub wrap pad">How to read this page: <b>Run</b> counts only bets on the current test rules. <b>All</b> also includes Nov 22, when the bot bet bigger before the fixes, so it looks much worse. Test bets are 3% of each strategy's $100 paper account (one contract before Nov 24), so the dollar amounts swing on luck. The labels are the real signal: watch for Promising or Proven.${book === 'btc' ? ' The sell-early card grades exits only: green there means selling early beat holding on those bets, not that the bets made money.' : ''}</div>
+    <div class="row-sub wrap pad">Each strategy counts once here; its $1K, $5K and $10K copies share its verdict and show on its card above. How to read this page: <b>Run</b> counts only bets on the current test rules. <b>All</b> also includes Nov 22, when the bot bet bigger before the fixes, so it looks much worse. Test bets are 3% of each strategy's $100 paper account (one contract before Nov 24), so the dollar amounts swing on luck. The labels are the real signal: watch for Promising or Proven.${book === 'btc' ? ' The sell-early card grades exits only: green there means selling early beat holding on those bets, not that the bets made money.' : ''}</div>
   </div>`;
 }
 
 function researchCard(lab) {
   if (!lab?.strategies) return '<div class="card pad">Every 5 minutes the board judges each strategy on its bets under the new rules: losers retire, winners bet more. First verdicts in a few minutes.</div>';
   const order = { proven: 0, promising: 1, testing: 2, retired: 3 };
-  const rows = Object.entries(lab.strategies).filter(([id]) => STRATEGY_LABEL[id])
+  const rows = Object.entries(lab.strategies).filter(([id]) => STRATEGY_LABEL[id] && !is1k(id))
     .sort((x, y) => order[x[1].status] - order[y[1].status] || (y[1].low ?? -9) - (x[1].low ?? -9) || (y[1].n || 0) - (x[1].n || 0));
-  const top = (lab.top || []).filter((id) => STRATEGY_LABEL[id]).map((id) => esc(variantOf(id)));
+  const top = [...new Set((lab.top || []).filter((id) => STRATEGY_LABEL[id]).map(baseOf))].map((id) => esc(variantOf(id)));
   const count = (k) => rows.filter(([, v]) => v.status === k).length;
   return `<div class="card">
     <div class="row"><div class="row-main"><div class="row-title">Top 3 so far</div><div class="row-sub">${top.length ? top.join(' · ') : 'Nothing has earned it yet. A strategy needs 30 bets on the new rules and to be ahead even in its worst case.'}</div></div><div class="row-end dim">${count('proven')} proven · ${count('promising')} promising · ${count('testing')} testing · ${count('retired')} retired</div></div>
@@ -1302,16 +1304,21 @@ function liveTabRest(b) {
 
 function botRest(b) {
   const L = b.live;
-  const losses = (b.record?.closed || 0) - (b.record?.wins || 0);
   const book = b.book || 'btc', group = BOOK_GROUP[book];
   const ids = Object.keys(STRATEGY_LABEL).filter((id) => bookOf(id) === book);
   const lineup = ids.map((id) => ({ strategy: id, closed: 0, wins: 0, open: 0, pnl: 0, staked: 0, ...((b.byStrategy || []).find((x) => x.strategy === id) || {}) }));
-  const leader = lineup.filter((x) => x.closed && !is1k(x.strategy)).sort((x, y) => y.pnl - x.pnl)[0];
+  // Nov 27: the tiles match the headline: the $100 accounts of strategies still running, over the range picked.
+  const c = store.botCurve[curveKey('paper')]?.data;
+  const act = activeBase(b, group).filter((id) => !is1k(id));
+  const sum = act.reduce((a, id) => { const x = c?.per?.[id]; return x ? { n: a.n + (x.n || 0), w: a.w + (x.w || 0), pnl: a.pnl + (x.pnl || 0) } : a; }, { n: 0, w: 0, pnl: 0 });
+  const lead = act.map((id) => ({ id, pnl: c?.per?.[id]?.pnl || 0, n: c?.per?.[id]?.n || 0 })).filter((x) => x.n).sort((x, y) => y.pnl - x.pnl)[0];
+  const open100 = (b.positions || []).filter((p) => !is1k(p.strategy)), hist100 = (b.history || []).filter((p) => !is1k(p.strategy));
+  const range = BOT_RANGE_LABEL[store.botRange].toLowerCase();
   const tiles = [
-    { label: 'Open', value: String(b.positions.length), foot: `${money(b.atRisk)} at risk` },
-    { label: 'Record', value: b.record?.closed ? `${b.record.wins}–${losses}` : '–', foot: 'all paper, all time' },
-    { label: 'Realized', value: money(b.realized || 0, { sign: true }), cls: tone(b.realized || 0), foot: 'paper, after fees' },
-    { label: 'Leading', value: leader ? money(leader.pnl, { sign: true }) : '–', cls: leader ? tone(leader.pnl) : '', foot: leader ? variantOf(leader.strategy) || leader.strategy : 'no closed trades yet' },
+    { label: 'Open', value: String(open100.length), foot: `${money(b.atRisk)} at risk, $100 accounts` },
+    { label: 'Record', value: sum.n ? `${sum.w}–${sum.n - sum.w}` : '–', foot: `${act.length} running, ${range}` },
+    { label: 'Realized', value: money(sum.pnl, { sign: true }), cls: tone(sum.pnl), foot: 'paper, after fees' },
+    { label: 'Leading', value: lead ? money(lead.pnl, { sign: true }) : '–', cls: lead ? tone(lead.pnl) : '', foot: lead ? variantOf(lead.id) || lead.id : 'no closed trades yet' },
   ];
   const stratGroup = (g, title) => {
     const rows = lineup.filter((x) => groupOf(x.strategy) === g);
@@ -1320,10 +1327,8 @@ function botRest(b) {
     return `<div class="group-head" style="display:flex;justify-content:space-between"><span>${title}</span><span class="num ${tone(total)}">${money(total, { sign: true })}</span></div>
       <div class="card">${rows.map((x) => `<div class="row"><div class="row-main"><div class="row-title">${esc(variantOf(x.strategy))}${L && L.strategy === x.strategy ? ' <span class="pill won">Real money</span>' : ''}</div><div class="row-sub">${x.closed ? `${x.wins}–${x.closed - x.wins} · ${x.staked ? signedPct(x.pnl / x.staked) : '–'} on ${money(x.staked)}` : 'No closed trades yet'}${x.open ? ` · ${x.open} open` : ''}${b.exits?.[x.strategy]?.early ? ` · early sells ${money(b.exits[x.strategy].vsHold, { sign: true })} vs holding` : ''}${b.records?.[x.strategy]?.f > 0 ? ` · sizing up on its record (${signedPct(b.records[x.strategy].mean)} a dollar, t ${Number(b.records[x.strategy].t).toFixed(1)})` : ''}</div></div><div class="row-end strat-end"><div class="row-amt ${tone(x.pnl)}">${money(x.pnl, { sign: true })}</div></div></div>`).join('')}</div>`;
   };
-  const showLive = L && store.botGroup === 'live';
 
   return `
-    ${showLive ? liveSection(L) : ''}
 
     <div class="section">
       <div class="section-title">Where things stand<small>${b.lab?.at ? `board updated ${ago(new Date(b.lab.at).toISOString())}` : 'in plain words'}</small></div>
@@ -1366,21 +1371,25 @@ function botRest(b) {
     </div>
 
     <div class="section">
-      <div class="section-title">All-time by strategy<small>each its own ${money(b.allocation, { cents: false })}</small></div>
+      <div class="section-title">The $100 accounts<small>${esc(BOT_RANGE_LABEL[store.botRange])}</small></div>
       <div class="stats" style="margin-bottom:6px">${tiles.map(statTile).join('')}</div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">All-time by strategy<small>each its own account, retired included</small></div>
       ${stratGroup(group, `${BOOK_NAME[book]} · $100 accounts`)}
       ${SIZES.map(([k, , n]) => stratGroup(`${group}${k}`, `${BOOK_NAME[book]} · ${n} accounts`)).join('')}
       ${book === 'sports' && !b.sports ? '<div class="card pad off-note"><b>The Sports bot is asleep.</b> SPORTS is set to off in Cloudflare.</div>' : ''}
     </div>
 
-    ${showLive ? '' : `<div class="section">
-      <div class="section-title">Open · paper<small>${b.positions.length ? 'live prices' : ''}</small></div>
-      ${b.positions.length ? `<div class="card">${b.positions.map(posRow).join('')}</div>`
+    ${`<div class="section">
+      <div class="section-title">Open · paper<small>${open100.length ? '$100 accounts, live prices' : ''}</small></div>
+      ${open100.length ? `<div class="card">${open100.map(posRow).join('')}</div>`
         : `<div class="card empty"><h3>No open paper positions</h3>When a paper strategy buys, it shows up here with its live price and P&L.</div>`}
     </div>
     <div class="section">
-      <div class="section-title">History · paper<small>${b.history.length ? `last ${Math.min(50, b.history.length)}` : ''}</small></div>
-      ${b.history.length ? `<div class="card">${b.history.slice(0, 50).map(histRow).join('')}</div>`
+      <div class="section-title">History · paper<small>${hist100.length ? `last ${Math.min(50, hist100.length)}, $100 accounts` : ''}</small></div>
+      ${hist100.length ? `<div class="card">${hist100.slice(0, 50).map(histRow).join('')}</div>`
         : `<div class="card empty"><h3>Nothing closed yet</h3>Every closed paper position lands here with its result and P&L after fees.</div>`}
     </div>`}
 
