@@ -6,7 +6,7 @@ const store = {
   state: null,     // { snapshot, lastSync, apiConfigured }
   bot: null,      // /api/bot: the bot's own ledger
   botRange: 'run', // bot chart: run (bets on the current rules) | 1h | 1d | 1w | all
-  botBook: (() => { try { const v = localStorage.getItem('pm-bot-book'); return v === 'sports' || v === 'cricket' ? v : 'btc'; } catch { return 'btc'; } })(), // btc | sports | cricket: three bots, three books
+  botBook: (() => { try { const v = localStorage.getItem('pm-bot-book'); return v === 'sports' || v === 'cricket' || v === 'live' ? v : 'btc'; } catch { return 'btc'; } })(), // btc | sports | cricket: three bots, three books
   botGroup: 'btc', // live | btc | hoops
   botGroupSet: false,
   botCurve: {},    // 'paper:1d' | 'live:all' ... -> { at, data } from /api/bot/curve
@@ -592,7 +592,7 @@ const GROUP_LABEL = { live: 'Real money', btc: 'Paper · Bitcoin', hoops: 'Paper
 const CHIP_LABEL = { live: 'Real money', btc: '$100 accounts', hoops: '$100 accounts', cricket: '$100 accounts', ...Object.fromEntries(SIZES.flatMap(([k]) => [[`btc${k}`, `$${k.toUpperCase()}`], [`hoops${k}`, `$${k.toUpperCase()}`], [`cricket${k}`, `$${k.toUpperCase()}`]])) };
 const groupBank = (g, b) => SIZES.find(([k]) => String(g).endsWith(k))?.[1] || b?.allocation || 100;
 const BOOK_LABEL = { btc: 'Bitcoin bot', sports: 'Sports bot', cricket: 'Cricket bot' };
-const BOOK_GROUP = { btc: 'btc', sports: 'hoops', cricket: 'cricket' };
+const BOOK_GROUP = { btc: 'btc', sports: 'hoops', cricket: 'cricket', live: 'live' };
 const BOOK_NAME = { btc: 'Bitcoin', sports: 'Basketball', cricket: 'Cricket' };
 const BOT_RANGE_LABEL = { run: 'This run, on the new rules', '1h': 'Last hour', '1d': 'Last 24 hours', '1w': 'Last 7 days', all: 'Since it started' };
 const iconBadge = ([bg, fg, path]) => `<span class="badge" style="background:${bg};color:${fg}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${path}</svg></span>`;
@@ -608,7 +608,7 @@ async function loadCurve(range, mode) {
 }
 // Each bot shows only its own book: the Bitcoin bot's paper lineup (and real money once it trades),
 // or the Sports bot's paper lineup. They're never added together.
-const botGroups = (b) => (b?.book === 'sports' ? ['hoops'] : b?.book === 'cricket' ? ['cricket'] : [...(b?.live ? ['live'] : []), 'btc']);
+const botGroups = (b) => (store.botBook === 'live' ? ['live'] : b?.book === 'sports' ? ['hoops'] : b?.book === 'cricket' ? ['cricket'] : [...(b?.live ? ['live'] : []), 'btc']);
 // Nov 25: one card per strategy with its $100 / $1K / $5K / $10K accounts inside it, and the headline number counts
 // only the $100 accounts of strategies still running (retired ones are listed apart, never mixed in).
 // A bigger copy's own strategy: crypto_fav_99_1m_10k -> crypto_fav_99_1m; model value's copies drop the _v1
@@ -640,14 +640,16 @@ async function refreshBot({ curve = false } = {}) {
   if (store.mode === 'preview') return;
   try {
     const book = store.botBook;
-    const r = await fetch(`/api/bot?book=${book}`);
+    // Nov 26: the Live tab reads the Bitcoin bot's data, which carries the real-money account.
+    const r = await fetch(`/api/bot?book=${book === 'live' ? 'btc' : book}`);
     if (!r.ok) return;
     const b = await r.json();
     if (book !== store.botBook) return; // switched bots while this was loading
     const prev = store.bot;
     const closedChanged = !!prev && (b.record?.closed !== prev.record?.closed || b.live?.record?.closed !== prev.live?.record?.closed);
     store.bot = b;
-    if (!store.botGroupSet || !botGroups(b).includes(store.botGroup)) { store.botGroup = b.book === 'sports' ? 'hoops' : b.book === 'cricket' ? 'cricket' : b.live ? 'live' : 'btc'; store.botGroupSet = true; }
+    if (book === 'live') { store.botGroup = 'live'; store.botGroupSet = true; }
+    else if (!store.botGroupSet || !botGroups(b).includes(store.botGroup)) { store.botGroup = b.book === 'sports' ? 'hoops' : b.book === 'cricket' ? 'cricket' : b.live ? 'live' : 'btc'; store.botGroupSet = true; }
     const need = [['paper', store.botRange], ...(b.live ? [['live', store.botRange]] : [])];
     await Promise.all(need.map(([mode, range]) => {
       const c = store.botCurve[curveKey(mode, range)];
@@ -670,7 +672,7 @@ function renderBot() {
   if (!botBuilt) {
     el.innerHTML = `
       <div class="segmented book-switch" id="bot-book" role="tablist" aria-label="Which bot"><div class="thumb"></div>
-        <button data-book="btc" role="tab">Bitcoin</button><button data-book="sports" role="tab">Basketball</button><button data-book="cricket" role="tab">Cricket</button>
+        <button data-book="btc" role="tab">Bitcoin</button><button data-book="sports" role="tab">Basketball</button><button data-book="cricket" role="tab">Cricket</button><button data-book="live" role="tab">Live $</button>
       </div>
       <div class="hero"><div class="hero-label" id="bot-label"></div><div class="hero-value num" id="bot-value">–</div><div class="hero-sub" id="bot-sub"></div></div>
       <div class="chips bot-chips" id="bot-groups"></div>
@@ -688,10 +690,12 @@ function renderBot() {
     setupBotControls();
   }
   if (store.botFocus && bookOf(store.botFocus) !== (b.book || 'btc')) store.botFocus = null;
+  const liveTab = store.botBook === 'live';
+  $('.strat-section', el).style.display = liveTab ? 'none' : '';
   paintBotChips();
   if (!botScrub) { paintBotHero(); drawBotChart(); }
-  paintStratGrid();
-  $('#bot-rest').innerHTML = botRest(b);
+  if (!liveTab) paintStratGrid();
+  $('#bot-rest').innerHTML = liveTab ? liveTabRest(b) : botRest(b);
 }
 
 function setupBotControls() {
@@ -736,8 +740,9 @@ function setupBotControls() {
       return !c || Date.now() - c.at > 30_000 ? loadCurve(store.botRange, m) : null;
     }));
     botAnimate = true;
-    paintBotHero(); drawBotChart(); paintStratGrid();
-    $('#bot-rest').innerHTML = botRest(store.bot);
+    paintBotHero(); drawBotChart();
+    if (store.botBook === 'live') $('#bot-rest').innerHTML = liveTabRest(store.bot);
+    else { paintStratGrid(); $('#bot-rest').innerHTML = botRest(store.bot); }
   }));
   new ResizeObserver(() => { place(); if (!botScrub) drawBotChart(); }).observe(seg);
   place();
@@ -1258,6 +1263,40 @@ function liveSection(L) {
       <div class="section-title">History · real money<small>${L.history.length ? `last ${Math.min(50, L.history.length)}` : ''}</small></div>
       ${L.history.length ? `<div class="card">${L.history.slice(0, 50).map(histRow).join('')}</div>`
         : `<div class="card empty"><h3>Nothing closed yet</h3>Every closed real-money position lands here with its result and P&L after fees.</div>`}
+    </div>`;
+}
+
+// Nov 26: the Live tab. Everything about the real-money account in one place: is it on, what it trades,
+// the bet cap, the account, every real bet next to the paper bet on the same window, and every order.
+function liveTabRest(b) {
+  const L = b.live;
+  if (!L) return `<div class="section"><div class="card empty"><h3>Real trading is off</h3>Set LIVE_TRADING to on in Cloudflare to start. The strategy and bet cap are set there too.</div></div>`;
+  const verdict = b.lab?.strategies?.[L.strategy];
+  const twinOf = (p) => (L.twins || []).find((t) => t.market_slug === p.market_slug);
+  const bets = [...L.positions, ...L.history].sort((a, z) => (z.opened_at || 0) - (a.opened_at || 0));
+  const paired = bets.map((p) => ({ p, t: twinOf(p) })).filter((x) => x.t && x.t.avg_entry != null && x.p.avg_entry != null);
+  const slip = paired.length ? paired.reduce((s, x) => s + (x.p.avg_entry - x.t.avg_entry), 0) / paired.length : null;
+  const sameResult = paired.filter((x) => x.p.status !== 'open' && x.t.status !== 'open');
+  const agree = sameResult.filter((x) => (x.p.pnl > 0) === (x.t.pnl > 0)).length;
+  const cash = store.state?.snapshot?.cash;
+  const setup = `<div class="card">
+      <div class="row"><div class="row-main"><div class="row-title">${L.on ? 'Real trading is on' : 'Real trading is off'}</div><div class="row-sub wrap">Trading <b>${esc(variantOf(L.strategy) || L.strategy)}</b> with real money, ${L.maxBet ? `at most ${money(L.maxBet)} a bet` : 'sized on its record (no cap set)'}, from a ${money(b.allocation, { cents: false })} allocation. It never deposits and never trades past that money and its own winnings.</div></div><div class="row-end"><span class="pill ${L.on ? 'won' : 'lost'}">${L.on ? 'Live' : 'Off'}</span></div></div>
+      ${verdict ? `<div class="row"><div class="row-main"><div class="row-title">Research board</div><div class="row-sub wrap">${esc(verdict.reason || '')}</div></div><div class="row-end"><span class="pill ${verdict.status === 'retired' ? 'lost' : verdict.status === 'proven' || verdict.status === 'promising' ? 'won' : ''}">${esc(verdict.status || '')}</span></div></div>` : ''}
+      ${cash != null ? `<div class="row"><div class="row-main"><div class="row-title">Polymarket cash</div><div class="row-sub">Whole account, from the last sync${store.state?.lastSync ? ` ${ago(store.state.lastSync.t)}` : ''}. The bot only uses its allocation.</div></div><div class="row-end"><div class="row-amt num">${money(cash)}</div></div></div>` : ''}
+    </div>`;
+  const vsRow = ({ p, t }) => {
+    const d = p.avg_entry - t.avg_entry;
+    const res = p.status === 'open' ? 'open' : p.pnl > 0 ? 'won' : 'lost';
+    return `<div class="row with-badge">${badge(p.side_name || p.title)}<div class="row-main"><div class="row-title">${esc(p.side_name || p.side)} · ${res}</div><div class="row-sub">real ${cents(p.avg_entry)} × ${Math.round(p.qty || 0)} · paper ${cents(t.avg_entry)} · ${Math.abs(d) < 0.0005 ? 'same price' : `${d > 0 ? 'paid' : 'saved'} ${cents(Math.abs(d))} a contract`}${p.fees != null ? ` · fee ${money(p.fees)}` : ''}</div></div><div class="row-end"><div class="row-amt ${tone(p.pnl || 0)}">${p.status === 'open' ? '' : money(p.pnl || 0, { sign: true })}</div><div class="row-meta">${p.opened_at ? ago(new Date(p.opened_at).toISOString()) : ''}</div></div></div>`;
+  };
+  return `
+    <div class="section"><div class="section-title">Setup<small>from Cloudflare</small></div>${setup}</div>
+    ${liveSection(L)}
+    <div class="section">
+      <div class="section-title">Real vs paper<small>same strategy, same window</small></div>
+      ${paired.length ? `<div class="card pad row-sub wrap" style="margin-bottom:8px">${paired.length} real bet${paired.length === 1 ? '' : 's'} matched to the paper bet on the same window. Average real price ${slip == null ? '–' : Math.abs(slip) < 0.0005 ? 'the same as paper' : `${cents(Math.abs(slip))} ${slip > 0 ? 'worse' : 'better'} than paper`}.${sameResult.length ? ` Results agree on ${agree} of ${sameResult.length}.` : ''}</div>
+        <div class="card">${paired.slice(0, 50).map(vsRow).join('')}</div>`
+        : `<div class="card empty"><h3>No real bets yet</h3>Each real bet will show here next to the paper bet on the same window, so you can see if real fills match paper.</div>`}
     </div>`;
 }
 

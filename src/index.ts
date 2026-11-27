@@ -27,6 +27,7 @@ interface Env extends PmEnv {
   BOT_MAX_BET?: string;     // Aaron's cap per bet in dollars (none by default; bets grow with the account)
   BTC_STREAM?: string;      // "off" turns the live bitcoin streams off
   LIVE_STRATEGY?: string;   // which bitcoin strategy trades real money (default crypto_fair_v1)
+  LIVE_MAX_BET?: string;    // cap per real-money bet only (Nov 26)
   SPORTS?: string;          // "off" puts the Sports bot to sleep (game feed, recorder, basketball paper traders); on by default
   SPORTS_STRATEGY?: string; // which sports strategy its readiness card follows (default hoops_trailer_v1, Aaron's style)
   LIVE_TRADING?: string;    // "on" lets the bot place real orders with its live account (Aaron sets it; default off)
@@ -283,9 +284,18 @@ async function bot(env: Env, book: Book) {
     // The Bitcoin bot's real-money account (only bitcoin has a live engine so far).
     const anyLive = (await q<{ n: number }>(`SELECT COUNT(*) AS n FROM bot_positions WHERE mode = 'live'${scope}`))[0]?.n || 0;
     const events = await q<any>('SELECT ts, kind, slug, detail FROM live_events ORDER BY ts DESC LIMIT 40');
-    live = liveOn || anyLive || events.length
-      ? { on: liveOn, strategy: env.LIVE_STRATEGY || 'crypto_fair_v1', ...(await block('live')), events }
-      : null;
+    if (liveOn || anyLive || events.length) {
+      const liveId = env.LIVE_STRATEGY || 'crypto_fair_v1';
+      const acct = await block('live');
+      // Nov 26 (Live tab): each real bet next to the paper bet its strategy made on the same window, so
+      // the phone can show whether real fills match paper (price, size, result).
+      const slugs = [...new Set([...acct.positions, ...acct.history].map((p: any) => p.market_slug))].slice(0, 100);
+      const twins = slugs.length
+        ? await q<any>(`SELECT market_slug, side, avg_entry, qty, cost, fees, pnl, status, opened_at FROM bot_positions
+            WHERE mode = 'paper' AND strategy = ? AND market_slug IN (${slugs.map(() => '?').join(',')})`, liveId, ...slugs)
+        : [];
+      live = { on: liveOn, strategy: liveId, maxBet: Number(env.LIVE_MAX_BET) > 0 ? Number(env.LIVE_MAX_BET) : null, ...acct, events, twins };
+    }
     // What the bitcoin model has learned: its latest self-grading (every half hour), each
     // exchange's offset to the official index (every window start), trades the data check refused.
     const brainRows = await q<{ k: string; v: string; at: number }>("SELECT k, v, at FROM brain WHERE k IN ('btc_model', 'btc_basis', 'btc_tod', 'btc_replica', 'btc_records')");
