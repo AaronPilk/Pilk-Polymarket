@@ -240,6 +240,19 @@ for (const base of CRYPTO_STRATEGIES.slice()) {
 }
 const BY_ID = new Map(CRYPTO_STRATEGIES.map((s) => [s.id, s]));
 export const CRYPTO_IDS = [...CRYPTO_STRATEGIES.map((s) => s.id), 'crypto_ladder_v1'];
+// Nov 27, Aaron ("how would three proven strategies work together under one account without clashing?"):
+// two paper accounts that don't have signals of their own. They copy the bets the $100 strategies place,
+// into one shared $100 account each, under the rules meant for the real account (research_notes /
+// claude/combo-replay.md):
+//   one bet per window   the first strategy to bet a window owns it; nothing else, either side, after it
+//   15% open cap         all open bets together stay under 15% of the account
+//   size by proof        5% of the account for a proven strategy, 2% for anything else
+//   US daytime           favorites under 97.5c skip 8 AM-4 PM ET, where they lose the most
+// crypto_combo copies only proven and promising strategies (the real-money template); crypto_combo_wide
+// copies every running strategy. They never change what the strategies themselves do, so the locked
+// 10-day test is untouched, and the board doesn't judge them (research.ts).
+export const COMBOS: { id: string; gated: boolean }[] = [{ id: 'crypto_combo', gated: true }, { id: 'crypto_combo_wide', gated: false }];
+export const COMBO_RULES = { proven: 0.05, other: 0.02, openCap: 0.15, favUnder: 0.975, dayFrom: 8, dayTo: 16 };
 
 function etParts(ms: number) {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
@@ -1392,10 +1405,44 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
             pos.mode = 'paper';
             this.open.push(pos);
             this.bankCache.delete(st.id);
+            if (!parentOf(st.id)) for (const c of COMBOS) await this.comboEnter(c, st, status, w, best, tau, now);
           }
         }
       }
       if (liveGo) await this.liveEnter(w, st, best, f, tau, now, mid);
+    }
+  }
+
+  // ---------- shared accounts (COMBOS): copy a $100 strategy's bet into each shared account its rules allow
+  private async comboEnter(c: { id: string; gated: boolean }, st: CryptoStrategy, status: Status, w: Win, best: Cand, tau: number, now: number) {
+    try {
+      if (c.gated && status !== 'proven' && status !== 'promising') return;
+      if (st.fav && best.ask < COMBO_RULES.favUnder) {
+        const h = etParts(now).h;
+        if (h >= COMBO_RULES.dayFrom && h < COMBO_RULES.dayTo) return;
+      }
+      // One bet per window, ever: open or already closed, either side.
+      if (this.open.some((x) => x.strategy === c.id && x.market_slug === w.slug)) return;
+      const had = await this.env.DB.prepare('SELECT 1 AS x FROM bot_positions WHERE strategy = ? AND market_slug = ? LIMIT 1').bind(c.id, w.slug).first();
+      if (had) return;
+      const bank = await this.bank(c.id, now);
+      if (!(bank.equity > 0) || dailyStopHit(bank.equity, bank.today, bank.peak)) return;
+      const frac = status === 'proven' ? COMBO_RULES.proven : COMBO_RULES.other;
+      let stake = Math.min(bank.equity * frac, bank.available, Math.max(0, bank.equity * COMBO_RULES.openCap - bank.openNet));
+      if (best.depth != null && best.depth > 0) stake = Math.min(stake, best.depth * best.ask * 0.25);
+      const qty = Math.floor(stake / (best.ask + feePer(best.ask)));
+      if (qty < 1) return;
+      const pos = await openPosition(this.env.DB, {
+        strategy: c.id, slug: w.slug, title: `BTC Up or Down ${w.series}`, side: best.side,
+        sideName: `BTC ${w.series} ${best.side === 'long' ? 'Up' : 'Down'}`, ask: best.ask, qty, coef: COEF,
+        reason: `copied from ${st.id} (${status}, ${Math.round(frac * 100)}% of the account), ${leftText(tau)}`, now, tpBelow: st.tpBelow,
+        meta: { src: st.id, srcStatus: status, frac, equity: r2(bank.equity), openNet: r2(bank.openNet), tau: Math.round(tau), rules: RULES, combo: true },
+      });
+      pos.mode = 'paper';
+      this.open.push(pos);
+      this.bankCache.delete(c.id);
+    } catch (e) {
+      console.log('combo entry failed', c.id, String(e));
     }
   }
 
@@ -1544,7 +1591,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       this.closed(p, now);
       return;
     }
-    const st = BY_ID.get(p.strategy);
+    const st = BY_ID.get(p.strategy) ?? BY_ID.get(comboSrc(p) ?? '');
     // Stop-loss: sell into the bid the moment it is at or under the stop (taker fee charged). If the price
     // gapped past the stop, the sale is at the lower bid, which is the honest fill.
     if (st?.stopAt != null && p.mode === 'paper' && bidSide > 0 && bidSide <= st.stopAt) {
@@ -1558,7 +1605,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     // A test position is judged on the blend it was entered on (judgingBlend), so its exits follow the
     // same rules as the record the board grades.
     const qMid = q.bid != null && q.ask != null ? (q.bid + q.ask) / 2 : null;
-    const up = blendProb(judgingBlend(this.blends, bandOf(tau), statusOf(this.lab, p.strategy) === 'testing'), fair, qMid ?? fair);
+    const up = blendProb(judgingBlend(this.blends, bandOf(tau), statusOf(this.lab, comboSrc(p) ?? p.strategy) === 'testing'), fair, qMid ?? fair);
     const fairSide = p.side === 'long' ? up : 1 - up;
     if (st.makerExit) {
       // A resting sell kept at fair + exitAbove (re-priced as fair moves). It fills, with no fee,
@@ -1925,3 +1972,8 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
 export const _strategies = CRYPTO_STRATEGIES;
 export { parseWindow };
 
+// A shared account's position remembers which strategy's bet it copied, so it exits the way that strategy does.
+function comboSrc(p: { strategy?: string; meta?: string | null }): string | null {
+  if (!String(p.strategy || '').startsWith('crypto_combo') || !p.meta) return null;
+  try { return JSON.parse(p.meta).src ?? null; } catch { return null; }
+}

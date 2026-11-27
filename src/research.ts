@@ -167,6 +167,7 @@ export function parentOf(id: string): string | null {
 export function board(rowsBy: Map<string, ReadyRow[]>, ids: string[], book: Book, now = Date.now(), quickBy?: Map<string, Quick>) {
   const strategies: Record<string, Verdict> = {};
   for (const id of new Set([...ids, ...rowsBy.keys()])) {
+    if (id.startsWith('crypto_combo')) continue;   // shared accounts copy other strategies' bets; nothing to judge
     strategies[id] = judge(id, rowsBy.get(id) || [], book);
     const q = quickBy?.get(id);
     if (q) strategies[id].quick = q;

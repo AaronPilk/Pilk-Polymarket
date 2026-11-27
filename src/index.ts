@@ -235,7 +235,7 @@ async function bot(env: Env, book: Book) {
   const scope = ` AND strategy LIKE '${BOOKS[book]}'`;
   // Book totals, the run and the head-to-head leave out the $1,000 test accounts, so their bigger bets don't
   // drown the $100 lineup; their positions and history still show, and the phone charts them on their own.
-  const no1k = " AND NOT (strategy LIKE '%\\_1k' ESCAPE '\\' OR strategy LIKE '%\\_5k' ESCAPE '\\' OR strategy LIKE '%\\_10k' ESCAPE '\\')";
+  const no1k = " AND NOT (strategy LIKE '%\\_1k' ESCAPE '\\' OR strategy LIKE '%\\_5k' ESCAPE '\\' OR strategy LIKE '%\\_10k' ESCAPE '\\' OR strategy LIKE 'crypto\\_combo%' ESCAPE '\\')";
 
   // One account's view: open positions marked at what they'd sell for, history, totals.
   const block = async (mode: 'paper' | 'live') => {
@@ -255,7 +255,7 @@ async function bot(env: Env, book: Book) {
       const upnl = value != null ? value - netIn : null;
       // Nov 27: the totals count the $100 accounts only, like the record above; the bigger copies'
       // open bets are still listed for their own rows on the strategy cards.
-      const isCopy = /_(1k|5k|10k)$/.test(String(p.strategy || ''));
+      const isCopy = /_(1k|5k|10k)$/.test(String(p.strategy || '')) || String(p.strategy || '').startsWith('crypto_combo');
       if (!isCopy && upnl != null) unrealized += upnl;
       if (!isCopy) atRisk += Math.max(0, netIn);
       const orders = await q<any>('SELECT ts, action, price, qty, filled_qty, avg_fill, fee, status, reason, exchange_order_id FROM bot_orders WHERE position_id = ? ORDER BY ts', p.id);
@@ -441,6 +441,8 @@ async function botCurve(env: Env, range: string, mode: 'paper' | 'live') {
   for (const r of rows) {
     const i = Math.min(N - 1, Math.max(0, Math.floor((r.t - from) / step)));
     const pnl = r.pnl || 0;
+    // Shared accounts (crypto_combo*) copy other strategies' bets, so they stay out of the totals.
+    if (String(r.strategy || '').startsWith('crypto_combo')) continue;
     for (const g of ['all', groupOf(r.strategy)]) {
       if (!sum[g]) continue;
       sum[g][i] += pnl; n[g][i]++;

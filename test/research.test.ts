@@ -212,3 +212,10 @@ test('quick score: the move toward each bet a minute after it, from the 30-secon
   assert.deepEqual(b.strategies.crypto_test_v1.quick, q);
   assert.equal(b.strategies.crypto_test_v1.status, 'testing');
 });
+
+test('the board never judges the shared accounts (crypto_combo*)', () => {
+  const rows = new Map([['crypto_combo', [{ strategy: 'crypto_combo', hr: 1, game: 'x', real: -5, pnl: -5, cost: 5 }] as any]]);
+  const b = board(rows, ['crypto_fav_98'], 'btc');
+  assert.equal(b.strategies.crypto_combo, undefined);
+  assert.ok(b.strategies.crypto_fav_98);
+});
