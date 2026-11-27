@@ -251,8 +251,18 @@ export const CRYPTO_IDS = [...CRYPTO_STRATEGIES.map((s) => s.id), 'crypto_ladder
 // crypto_combo copies only proven and promising strategies (the real-money template); crypto_combo_wide
 // copies every running strategy. They never change what the strategies themselves do, so the locked
 // 10-day test is untouched, and the board doesn't judge them (research.ts).
-export const COMBOS: { id: string; gated: boolean }[] = [{ id: 'crypto_combo', gated: true }, { id: 'crypto_combo_wide', gated: false }];
-export const COMBO_RULES = { proven: 0.05, other: 0.02, openCap: 0.15, favUnder: 0.975, dayFrom: 8, dayTo: 16 };
+// Nov 27, Aaron ("what if we risk 10 or 15% more so we can grow the account faster?"): two more shared
+// accounts on the proven + promising strategies, betting 10% and 15% of the account on a proven strategy
+// (half that on a promising one) with the open cap at three bets' worth. Same one-bet-per-window and
+// daytime rules. They show what bigger bets do to growth and to the drops, on paper only.
+export interface Combo { id: string; gated: boolean; proven: number; other: number; openCap: number }
+export const COMBOS: Combo[] = [
+  { id: 'crypto_combo', gated: true, proven: 0.05, other: 0.02, openCap: 0.15 },
+  { id: 'crypto_combo_wide', gated: false, proven: 0.05, other: 0.02, openCap: 0.15 },
+  { id: 'crypto_combo_10', gated: true, proven: 0.10, other: 0.05, openCap: 0.30 },
+  { id: 'crypto_combo_15', gated: true, proven: 0.15, other: 0.075, openCap: 0.45 },
+];
+export const COMBO_RULES = { favUnder: 0.975, dayFrom: 8, dayTo: 16 };
 
 function etParts(ms: number) {
   const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
@@ -1414,7 +1424,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   }
 
   // ---------- shared accounts (COMBOS): copy a $100 strategy's bet into each shared account its rules allow
-  private async comboEnter(c: { id: string; gated: boolean }, st: CryptoStrategy, status: Status, w: Win, best: Cand, tau: number, now: number) {
+  private async comboEnter(c: Combo, st: CryptoStrategy, status: Status, w: Win, best: Cand, tau: number, now: number) {
     try {
       if (c.gated && status !== 'proven' && status !== 'promising') return;
       if (st.fav && best.ask < COMBO_RULES.favUnder) {
@@ -1427,8 +1437,8 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
       if (had) return;
       const bank = await this.bank(c.id, now);
       if (!(bank.equity > 0) || dailyStopHit(bank.equity, bank.today, bank.peak)) return;
-      const frac = status === 'proven' ? COMBO_RULES.proven : COMBO_RULES.other;
-      let stake = Math.min(bank.equity * frac, bank.available, Math.max(0, bank.equity * COMBO_RULES.openCap - bank.openNet));
+      const frac = status === 'proven' ? c.proven : c.other;
+      let stake = Math.min(bank.equity * frac, bank.available, Math.max(0, bank.equity * c.openCap - bank.openNet));
       if (best.depth != null && best.depth > 0) stake = Math.min(stake, best.depth * best.ask * 0.25);
       const qty = Math.floor(stake / (best.ask + feePer(best.ask)));
       if (qty < 1) return;

@@ -505,10 +505,14 @@ const API_FEE_SHARE = (0.0695 * 0.3) / 0.095;   // API taker fees after the 70% 
 const COMBO_LABEL = {
   crypto_combo: 'Proven + promising, one account',
   crypto_combo_wide: 'Every running strategy, one account',
+  crypto_combo_10: 'Proven + promising, bigger bets (10%)',
+  crypto_combo_15: 'Proven + promising, biggest bets (15%)',
 };
 const COMBO_SUB = {
   crypto_combo: 'Copies only proven (5% a bet) and promising (2%) strategies. The template for real money.',
   crypto_combo_wide: 'Copies every running Bitcoin strategy: proven at 5%, the rest at 2%.',
+  crypto_combo_10: 'Same strategies as the first, but 10% of the account on proven and 5% on promising, up to 30% open. Grows faster, drops harder.',
+  crypto_combo_15: '15% of the account on proven and 7.5% on promising, up to 45% open. The aggressive test: one loss costs 15%.',
 };
 const STRATEGY_LABEL = {
   // Nov 25: the Cricket bot (src/cricket.ts)
@@ -898,7 +902,7 @@ function paintStratGrid() {
     const total = s.pnl + open;
     return `<div class="card"><div class="row"><div class="row-main"><div class="row-title">${esc(COMBO_LABEL[id])}</div><div class="row-sub wrap">${COMBO_SUB[id]} ${s.n ? `${s.w}–${s.n - s.w} on ${s.n} closed${s.staked > 0 ? ` · ${signedPct(s.pnl / s.staked, 1)} a dollar` : ''}` : 'No closed bets yet in this range.'}${nOpen ? ` · ${nOpen} open` : ''}</div></div><div class="row-end"><div class="row-amt num ${s.n || nOpen ? tone(total) : 'faint'}">${s.n || nOpen ? money(total, { sign: true }) : '–'}</div><div class="row-meta">of $100</div></div></div>${miniChart(s.pts, open)}</div>`;
   }).join('') : '';
-  el.innerHTML = `${combos ? `<div class="group-head">Strategies sharing one account</div>${combos}<div class="row-sub wrap pad">Rules: one bet per window (first strategy in owns it), all open bets under 15% of the account, favorites under 97.5¢ skip 8 AM–4 PM ET. These copy the bets below; they're not counted in the totals. Started Nov 27.</div><div class="group-head">Every strategy</div>` : ''}<div class="strat-grid">${order(running).map(card).join('')}</div>
+  el.innerHTML = `${combos ? `<div class="group-head">Strategies sharing one account</div>${combos}<div class="row-sub wrap pad">Rules: one bet per window (first strategy in owns it), all open bets under 15% of the account (30% and 45% on the bigger-bet ones), favorites under 97.5¢ skip 8 AM–4 PM ET. These copy the bets below; they're not counted in the totals. Started Nov 27.</div><div class="group-head">Every strategy</div>` : ''}<div class="strat-grid">${order(running).map(card).join('')}</div>
     ${retired.length ? `<button class="more" data-retired-toggle>${store.showRetired ? 'Hide' : 'Show'} ${retired.length} retired</button>
     ${store.showRetired ? `<div class="strat-grid">${order(retired).map(card).join('')}</div>` : ''}` : ''}
     <div class="row-sub wrap pad">The big number on each card is the strategy's $100 test account. Under it, the same strategy copied onto bigger accounts, each with its own money. A copy marked retired lost money beyond luck and has stopped betting. The headline at the top adds up only the $100 accounts of strategies still running. Tap a card or a row to chart it alone. Rules are locked for the 10-day test (ends Dec 5, 4 PM): a strategy only stops early if it's behind beyond luck, and nothing that's up is ever retired.</div>`;
