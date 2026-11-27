@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_BLEND, blendProb, eventFor, fitBlend, gradeModel, judgingBlend, nextEvent, parseWindow, fairUp, logLoss, learnOffset, selectCheckpoints, windowSlug, type Mark } from '../src/cryptomath.ts';
-import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale, livePct, dailyBet } from '../src/fairvalue.ts';
+import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale, livePct, dailyBet, dailyClearlyRefused, DAILY_MIN_ASK, DAILY_HARD_MAX } from '../src/fairvalue.ts';
 
 test('parseWindow reads series, start and end', () => {
   const w = parseWindow('cpc-btc-updown-5m-2026-11-22-1940z')!;
@@ -307,4 +307,15 @@ test('LIVE_DAILY_BET reads dollars from 1 to 250, nothing else', () => {
   assert.equal(dailyBet(' $100 '), 100);
   assert.equal(dailyBet('250'), 250);
   for (const bad of [undefined, null, '', '0', '0.5', '-100', '251', '1000', 'hundred']) assert.equal(dailyBet(bad as any), null, String(bad));
+});
+
+test('daily bonus bet: day released only when the exchange clearly said no', () => {
+  assert.equal(dailyClearlyRefused({ error: null, reject: 'insufficient balance', filled: 0 }), true);
+  assert.equal(dailyClearlyRefused({ error: 'HTTP 400: bad qty', reject: null, filled: 0 }), true);
+  assert.equal(dailyClearlyRefused({ error: null, reject: null, filled: 0 }), true);
+  assert.equal(dailyClearlyRefused({ error: 'The operation was aborted due to timeout', reject: null, filled: 0 }), false);
+  assert.equal(dailyClearlyRefused({ error: 'HTTP 502: bad gateway', reject: null, filled: 0 }), false);
+  assert.equal(dailyClearlyRefused({ error: null, reject: null, filled: 103 }), false);
+  assert.equal(DAILY_MIN_ASK, 0.97);
+  assert.equal(DAILY_HARD_MAX, 250);
 });

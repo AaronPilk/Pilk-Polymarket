@@ -60,7 +60,7 @@
 import { DurableObject } from 'cloudflare:workers';
 import { DEFAULT_BLEND, SCORE_POINTS, bandOf, blendProb, eventFor, fairUp, gradeModel, judgingBlend, learnOffset, parseWindow, windowEnd, windowSlug, type Band, type Blend, type Mark } from './cryptomath';
 import { RULES, statusOf, parentOf, type Status, AT_SIZE_SQL } from './research';
-import { dailyBet, dailyStopHit, drawdownScale, livePct, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
+import { DAILY_HARD_MAX, DAILY_MIN_ASK, dailyBet, dailyClearlyRefused, dailyStopHit, drawdownScale, livePct, recordKelly, riskLimits, stakeFor, testStake } from './fairvalue';
 export { livePct };
 import { BOOK_FRESH, Book, applyBitstamp, applyCoinbase, applyGemini, replicaPrice } from './replica';
 import { bankroll, closePosition, liveSell, loadOpenBySlug, markLiveOrder, openLivePosition, openPosition, recordLiveTakeProfit, settlePosition, takeProfitFor, type Bankroll, type Position } from './paper';
@@ -1500,24 +1500,31 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     // bet the strategy makes is LIVE_DAILY_BET dollars instead of its usual size (never more than the live
     // account has free, hard-limited to $250). It's marked used before the order goes in and un-marked if
     // the order fails or doesn't fill, so it can't fire twice in a day. Unset LIVE_DAILY_BET to stop it.
-    let daily = false;
+    // Nov 27, Aaron: Polymarket gives $20 a day for placing a $100 trade, so once per ET day ONE real bet
+    // is LIVE_DAILY_BET dollars instead of the usual 5% size. Triple-checked guards (Aaron: "I don't want it
+    // to think it's allowed to trade $100 every time"):
+    //  - the day is claimed with one atomic write (only the first claim of an ET date succeeds), so two
+    //    windows betting at once can't both get it, and if that write fails the bet stays normal size;
+    //  - only on a 97¢+ favorite; never more than the account has free; hard max $250;
+    //  - the claim is released only when the exchange clearly said no (reject, 4xx, or answered with no
+    //    fill). A timeout or server error keeps it used for the day, in case the order went through anyway.
+    // Every other bet keeps the 5% / LIVE_MAX_BET caps. Unset LIVE_DAILY_BET to stop it.
+    let daily = false, dailyQty = 0;
     const rawDaily = this.env.LIVE_DAILY_BET;
     const dailyAmt = dailyBet(rawDaily);
     if (rawDaily != null && String(rawDaily).trim() !== '' && dailyAmt == null) {
       this.liveEvent(now, 'error', w.slug, `${name}: LIVE_DAILY_BET is set (${JSON.stringify(rawDaily)}) but isn't dollars between 1 and 250, ignored`);
     }
     const today = (() => { const e = etParts(now); return `${e.y}-${e.m}-${e.d}`; })();
-    if (dailyAmt != null) {
-      const used = await db.prepare("SELECT v FROM brain WHERE k = 'live_daily_bet'").first<{ v: string }>().catch(() => null);
-      if (used?.v !== today) {
-        // At least the full amount (Polymarket's bonus wants a $100 trade), unless the account can't cover it.
-        const per = best.ask + feePer(best.ask);
-        let q2 = Math.ceil(dailyAmt / best.ask);
-        if (q2 * per > bank.available) q2 = Math.floor(bank.available / per);
-        if (q2 > qty) { qty = q2; daily = true; }
-      }
+    if (dailyAmt != null && best.ask >= DAILY_MIN_ASK) {
+      // At least the full amount (Polymarket's bonus wants a $100 trade), unless the account can't cover it.
+      const per = best.ask + feePer(best.ask);
+      let q2 = Math.ceil(dailyAmt / best.ask);
+      if (q2 * per > bank.available) q2 = Math.floor(bank.available / per);
+      if (q2 * best.ask > DAILY_HARD_MAX) q2 = Math.floor(DAILY_HARD_MAX / best.ask);
+      if (q2 > qty) dailyQty = q2;
     }
-    if (qty < 1) return;   // real money: no probes
+    if (Math.max(qty, dailyQty) < 1) return;   // real money: no probes
     // Never trade a window where the account holds anything, or has orders the bot didn't place:
     // those are Aaron's, and the exchange would net them against the bot's.
     const [held, orders] = await Promise.all([accountPosition(env, w.slug), openOrders(env, w.slug)]);
@@ -1525,20 +1532,24 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     if (Math.abs(held) > 1e-9) { this.liveSkip.set(w.slug, w.end); this.liveEvent(now, 'skip', w.slug, `${name}: the account already holds ${held} contracts here, skipped this window`); return; }
     if (orders.some((o) => !this.liveOrderIds.has(o.id))) { this.liveSkip.set(w.slug, w.end); this.liveEvent(now, 'skip', w.slug, `${name}: you have orders open here, skipped this window`); return; }
 
+    const markDaily = (v: string | null) => (v == null
+      ? db.prepare("DELETE FROM brain WHERE k = 'live_daily_bet' AND v = ?").bind(today).run()
+      : db.prepare("INSERT INTO brain (k, v, at) VALUES ('live_daily_bet', ?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at WHERE brain.v IS NOT excluded.v").bind(v, now).run());
+    if (dailyQty > qty) {
+      const claim = await markDaily(today).catch(() => null);
+      if (claim?.meta?.changes === 1) { qty = dailyQty; daily = true; }
+    }
+    if (qty < 1) return;
     const spec: OrderSpec = { slug: w.slug, side: best.side, action: 'buy', sidePx: best.ask, qty, tif: 'ioc' };
     if (!this.liveVerified) {
       const pv = await previewOrder(env, spec);
       this.liveEvent(now, pv.ok ? 'preview' : 'error', w.slug, `${pv.ok ? 'Preview checked out' : 'Preview failed'}: buy ${qty} ${name} at ${cents(best.ask)}. ${pv.detail}`);
-      if (!pv.ok) { this.livePausedUntil = now + 10 * MIN; return; }
+      if (!pv.ok) { if (daily) await markDaily(null).catch(() => null); this.livePausedUntil = now + 10 * MIN; return; }
       this.liveVerified = true;
     }
-    const markDaily = (v: string | null) => (v == null
-      ? db.prepare("DELETE FROM brain WHERE k = 'live_daily_bet'").run()
-      : db.prepare('INSERT INTO brain (k, v, at) VALUES (?,?,?) ON CONFLICT(k) DO UPDATE SET v = excluded.v, at = excluded.at').bind('live_daily_bet', v, now).run());
-    if (daily) await markDaily(today);
     const r = await placeOrder(env, spec);
     if (r.id) this.liveOrderIds.add(r.id);
-    if (daily && (r.error || r.reject || r.filled <= 0)) await markDaily(null).catch(() => null);
+    if (daily && dailyClearlyRefused(r)) await markDaily(null).catch(() => null);
     if (r.error || r.reject) {
       this.liveEvent(now, 'error', w.slug, `Buy ${qty} ${name} at ${cents(best.ask)} failed: ${r.error || r.reject}`);
       if (++this.liveErrors >= 3) { this.liveErrors = 0; this.livePausedUntil = now + 15 * MIN; this.liveEvent(now, 'pause', null, 'Three order errors in a row: paused real trading for 15 minutes'); }

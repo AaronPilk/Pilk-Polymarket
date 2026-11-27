@@ -308,3 +308,14 @@ export function dailyBet(raw: unknown): number | null {
   const v = Number(String(raw).replace('$', '').trim());
   return v >= 1 && v <= 250 ? v : null;
 }
+
+// The once-a-day bonus bet: only on a 97¢+ favorite, never over $250 of contracts.
+export const DAILY_MIN_ASK = 0.97;
+export const DAILY_HARD_MAX = 250;
+// Release the day's bonus-bet claim only when the exchange clearly answered no. A timeout, network
+// error or 5xx might have gone through, so those keep the day used.
+export function dailyClearlyRefused(r: { error: string | null; reject: string | null; filled: number }): boolean {
+  if (r.reject) return true;
+  if (r.error) return /^HTTP 4\d\d/.test(r.error);
+  return !(r.filled > 0);
+}
