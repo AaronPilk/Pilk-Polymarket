@@ -1430,7 +1430,14 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
           }
         }
       }
-      if (liveGo) await this.liveEnter(w, st, best, f, tau, now, mid);
+      if (liveGo) {
+        try { await this.liveEnter(w, st, best, f, tau, now, mid); }
+        catch (e) { this.liveEvent(now, 'error', w.slug, `Real-money entry crashed: ${String((e as any)?.message || e).slice(0, 300)}`); }
+      } else if (liveId == null && paperGo && st.id === this.liveStrategy()) {
+        this.liveNote(now, w.slug, `no real bet: ${!this.liveOn() ? 'live trading is off or keys are missing' : now < this.livePausedUntil ? 'real trading is paused after order errors' : 'this window is marked as yours'}`);
+      } else if (liveId === st.id && paperGo) {
+        this.liveNote(now, w.slug, `no real bet: ${!liveFree ? 'a real bet is already open here or the window is blocked' : 'failed the fit check'}`);
+      }
     }
   }
 
