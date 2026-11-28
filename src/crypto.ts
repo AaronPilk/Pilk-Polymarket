@@ -305,7 +305,7 @@ interface CryptoEnv extends Partial<PmEnv> {
   LIVE_STRATEGY?: string;   // which strategy trades real money (default crypto_fair_v1)
   LIVE_MAX_BET?: string;    // cap per real-money bet only (Nov 26); BOT_MAX_BET would also cap every paper account
   LIVE_ALLOCATION?: string; // real-money only: dollars the bot treats as its own (Aaron sets it)
-  LIVE_BET_PCT?: string;    // real-money cap as a % of the live account, max 10 (Nov 27)
+  LIVE_BET_PCT?: string;    // real-money cap as a % of the live account, max 20 (Nov 27)
   LIVE_DAILY_BET?: string;  // once per ET day, the first real bet is this many dollars (max 250; Polymarket's $100-trade bonus)
 }
 type Side = 'long' | 'short';
@@ -1508,7 +1508,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
     }
     const rawPct = this.env.LIVE_BET_PCT;
     if (rawPct != null && String(rawPct).trim() !== '' && livePct(rawPct) == null) {
-      this.liveEvent(now, 'error', w.slug, `${name}: LIVE_BET_PCT is set (${JSON.stringify(rawPct)}) but isn't a percent between 0 and 10, skipped`);
+      this.liveEvent(now, 'error', w.slug, `${name}: LIVE_BET_PCT is set (${JSON.stringify(rawPct)}) but isn't a percent between 0 and 20, skipped`);
       return;
     }
     let qty = Math.floor(stake / best.ask);

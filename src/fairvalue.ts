@@ -295,11 +295,11 @@ export function thinLine(pts: [number, number][], chunks: number): [number, numb
   return out;
 }
 
-// LIVE_BET_PCT as a percent (5 means 5%), only when it reads as a number above 0 and at most 10.
+// LIVE_BET_PCT as a percent (5 means 5%), only when it reads as a number above 0 and at most 20 (Aaron raised the ceiling from 10 on Nov 27, 11:08 PM ET).
 export function livePct(raw: unknown): number | null {
   if (raw == null || String(raw).trim() === '') return null;
   const v = Number(String(raw).replace('%', '').trim());
-  return v > 0 && v <= 10 ? v : null;
+  return v > 0 && v <= 20 ? v : null;
 }
 
 // LIVE_DAILY_BET in dollars, only when it reads as a number from 1 to 250.

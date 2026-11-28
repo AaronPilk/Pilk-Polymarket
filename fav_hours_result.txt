@@ -1,0 +1,106 @@
+34 days, 2177 bets at 98-99.5c with ~3 min left
+
+ALL DATA
+  all                                    n  2177  lost  11   0.51%  avg 0.988  +0.61% a dollar
+  weekday 2-4 PM ET                      n   110  lost   2   1.82%  avg 0.988  -0.74% a dollar
+  everything else                        n  2067  lost   9   0.44%  avg 0.988  +0.68% a dollar
+  weekday 2:30-4 PM ET                   n    97  lost   2   2.06%  avg 0.988  -1.00% a dollar
+  weekend, all hours                     n   573  lost   3   0.52%  avg 0.988  +0.59% a dollar
+  weekend 2-4 PM ET                      n    44  lost   0   0.00%  avg 0.988  +1.15% a dollar
+
+BEFORE Nov 23 (out of sample)
+  all                                    n  1842  lost  10   0.54%  avg 0.988  +0.56% a dollar
+  weekday 2-4 PM ET                      n    83  lost   1   1.20%  avg 0.988  -0.15% a dollar
+  everything else                        n  1759  lost   9   0.51%  avg 0.988  +0.59% a dollar
+  weekday 2:30-4 PM ET                   n    74  lost   1   1.35%  avg 0.989  -0.31% a dollar
+  weekend, all hours                     n   573  lost   3   0.52%  avg 0.988  +0.59% a dollar
+  weekend 2-4 PM ET                      n    44  lost   0   0.00%  avg 0.988  +1.15% a dollar
+
+Nov 23 on (live period)
+  all                                    n   335  lost   1   0.30%  avg 0.987  +0.87% a dollar
+  weekday 2-4 PM ET                      n    27  lost   1   3.70%  avg 0.987  -2.56% a dollar
+  everything else                        n   308  lost   0   0.00%  avg 0.987  +1.17% a dollar
+  weekday 2:30-4 PM ET                   n    23  lost   1   4.35%  avg 0.987  -3.21% a dollar
+  weekend, all hours                     no bets
+  weekend 2-4 PM ET                      no bets
+
+BY ET HOUR, weekdays, all data
+  00:00                                  n    69  lost   0   0.00%  avg 0.988  +1.13% a dollar
+  01:00                                  n    70  lost   0   0.00%  avg 0.987  +1.18% a dollar
+  02:00                                  n    66  lost   1   1.52%  avg 0.988  -0.48% a dollar
+  03:00                                  n    78  lost   0   0.00%  avg 0.987  +1.17% a dollar
+  04:00                                  n    77  lost   0   0.00%  avg 0.988  +1.12% a dollar
+  05:00                                  n    52  lost   0   0.00%  avg 0.988  +1.09% a dollar
+  06:00                                  n    54  lost   0   0.00%  avg 0.988  +1.10% a dollar
+  07:00                                  n    58  lost   0   0.00%  avg 0.987  +1.19% a dollar
+  08:00                                  n    64  lost   0   0.00%  avg 0.987  +1.19% a dollar
+  09:00                                  n    81  lost   1   1.23%  avg 0.988  -0.14% a dollar
+  10:00                                  n    84  lost   1   1.19%  avg 0.987  -0.00% a dollar
+  11:00                                  n    79  lost   0   0.00%  avg 0.988  +1.06% a dollar
+  12:00                                  n    70  lost   0   0.00%  avg 0.989  +1.03% a dollar
+  13:00                                  n    71  lost   0   0.00%  avg 0.987  +1.15% a dollar
+  14:00                                  n    57  lost   1   1.75%  avg 0.987  -0.60% a dollar
+  15:00                                  n    53  lost   1   1.89%  avg 0.989  -0.89% a dollar
+  16:00                                  n    57  lost   0   0.00%  avg 0.989  +1.05% a dollar
+  17:00                                  n    70  lost   0   0.00%  avg 0.987  +1.17% a dollar
+  18:00                                  n    81  lost   1   1.23%  avg 0.987  -0.08% a dollar
+  19:00                                  n    62  lost   1   1.61%  avg 0.988  -0.54% a dollar
+  20:00                                  n    63  lost   1   1.59%  avg 0.988  -0.51% a dollar
+  21:00                                  n    63  lost   0   0.00%  avg 0.988  +1.12% a dollar
+  22:00                                  n    59  lost   0   0.00%  avg 0.989  +1.04% a dollar
+  23:00                                  n    66  lost   0   0.00%  avg 0.988  +1.08% a dollar
+
+BY ET HOUR, weekends, all data
+  00:00                                  n    27  lost   0   0.00%  avg 0.988  +1.09% a dollar
+  01:00                                  n    30  lost   0   0.00%  avg 0.987  +1.19% a dollar
+  02:00                                  n    23  lost   0   0.00%  avg 0.989  +1.04% a dollar
+  03:00                                  n    24  lost   0   0.00%  avg 0.989  +1.03% a dollar
+  04:00                                  n    32  lost   0   0.00%  avg 0.989  +1.00% a dollar
+  05:00                                  n    21  lost   0   0.00%  avg 0.987  +1.22% a dollar
+  06:00                                  n    21  lost   0   0.00%  avg 0.988  +1.09% a dollar
+  07:00                                  n    30  lost   0   0.00%  avg 0.988  +1.13% a dollar
+  08:00                                  n    22  lost   0   0.00%  avg 0.989  +1.04% a dollar
+  09:00                                  n    19  lost   0   0.00%  avg 0.989  +1.01% a dollar
+  10:00                                  n    21  lost   0   0.00%  avg 0.986  +1.27% a dollar
+  11:00                                  n    21  lost   0   0.00%  avg 0.988  +1.09% a dollar
+  12:00                                  n    26  lost   0   0.00%  avg 0.987  +1.24% a dollar
+  13:00                                  n    20  lost   2  10.00%  avg 0.988  -8.98% a dollar
+  14:00                                  n    20  lost   0   0.00%  avg 0.987  +1.24% a dollar
+  15:00                                  n    24  lost   0   0.00%  avg 0.988  +1.07% a dollar
+  16:00                                  n    17  lost   0   0.00%  avg 0.986  +1.24% a dollar
+  17:00                                  n    26  lost   1   3.85%  avg 0.988  -2.80% a dollar
+  18:00                                  n    24  lost   0   0.00%  avg 0.989  +1.03% a dollar
+  19:00                                  n    26  lost   0   0.00%  avg 0.987  +1.24% a dollar
+  20:00                                  n    23  lost   0   0.00%  avg 0.988  +1.12% a dollar
+  21:00                                  n    24  lost   0   0.00%  avg 0.988  +1.11% a dollar
+  22:00                                  n    23  lost   0   0.00%  avg 0.988  +1.08% a dollar
+  23:00                                  n    29  lost   0   0.00%  avg 0.988  +1.11% a dollar
+
+BY SESSION (ET), all days
+  Asia 7 PM-3 AM                         n   723  lost   3   0.41%  avg 0.988  +0.69% a dollar
+  London 3-8 AM                          n   447  lost   0   0.00%  avg 0.988  +1.12% a dollar
+  US 8 AM-2 PM                           n   578  lost   4   0.69%  avg 0.988  +0.43% a dollar
+  US 2-4 PM                              n   154  lost   2   1.30%  avg 0.988  -0.20% a dollar
+  US evening 4-7 PM                      n   275  lost   2   0.73%  avg 0.988  +0.39% a dollar
+
+BY WEEKDAY (0 = Mon)
+  0                                      n   341  lost   1   0.29%  avg 0.988  +0.82% a dollar
+  1                                      n   341  lost   3   0.88%  avg 0.988  +0.23% a dollar
+  2                                      n   313  lost   0   0.00%  avg 0.988  +1.12% a dollar
+  3                                      n   312  lost   3   0.96%  avg 0.988  +0.15% a dollar
+  4                                      n   297  lost   1   0.34%  avg 0.988  +0.76% a dollar
+  5                                      n   213  lost   1   0.47%  avg 0.988  +0.63% a dollar
+  6                                      n   360  lost   2   0.56%  avg 0.988  +0.57% a dollar
+
+BY SERIES
+  5m                                     n   375  lost   1   0.27%  avg 0.985  +1.12% a dollar
+  15m                                    n  1266  lost   8   0.63%  avg 0.988  +0.44% a dollar
+  1h                                     n   536  lost   2   0.37%  avg 0.989  +0.65% a dollar
+
+BY PRICE
+  98c                                    n   478  lost   6   1.26%  avg 0.980  +0.57% a dollar
+  99c+                                   n  1699  lost   5   0.29%  avg 0.990  +0.62% a dollar
+
+WEEKDAY 2-4 PM LOSSES BY DATE
+  2026-11-03                             n     6  lost   1  16.67%  avg 0.985  -15.54% a dollar
+  2026-11-27                             n     6  lost   1  16.67%  avg 0.987  -15.67% a dollar

@@ -29,7 +29,7 @@ interface Env extends PmEnv {
   LIVE_STRATEGY?: string;   // which bitcoin strategy trades real money (default crypto_fair_v1)
   LIVE_MAX_BET?: string;    // cap per real-money bet only (Nov 26)
   LIVE_ALLOCATION?: string; // real-money only: dollars of the account the bot treats as its own
-  LIVE_BET_PCT?: string;    // real-money cap as a % of the live account, max 10 (Nov 27)
+  LIVE_BET_PCT?: string;    // real-money cap as a % of the live account, max 20 (Nov 27)
   LIVE_DAILY_BET?: string;  // once per ET day, the first real bet is this many dollars (Nov 27)
   SPORTS?: string;          // "off" puts the Sports bot to sleep (game feed, recorder, basketball paper traders); on by default
   SPORTS_STRATEGY?: string; // which sports strategy its readiness card follows (default hoops_trailer_v1, Aaron's style)

@@ -289,12 +289,13 @@ test('checkpoints are filed by the moment they stand for, not the exact second o
   assert.equal(g.bands.late.windows, 120);
 });
 
-test('LIVE_BET_PCT reads a percent between 0 and 10, nothing else', () => {
+test('LIVE_BET_PCT reads a percent between 0 and 20, nothing else', () => {
   assert.equal(livePct('5'), 5);
   assert.equal(livePct(' 5% '), 5);
   assert.equal(livePct('2.5'), 2.5);
   assert.equal(livePct('10'), 10);
-  for (const bad of [undefined, null, '', '0', '-3', '11', '50', 'five', '0.05x']) assert.equal(livePct(bad as any), null, String(bad));
+  assert.equal(livePct('20'), 20);
+  for (const bad of [undefined, null, '', '0', '-3', '21', '50', 'five', '0.05x']) assert.equal(livePct(bad as any), null, String(bad));
   // the cap it gives: 5% of $102.80 is $5.14, of $400 is $20, of $91 after a loss is $4.55
   const cap = (eq: number, pct: number) => Math.floor(eq * pct) / 100;
   assert.equal(cap(102.8, 5), 5.14);
