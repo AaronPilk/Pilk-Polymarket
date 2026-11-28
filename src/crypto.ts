@@ -1777,7 +1777,7 @@ export class CryptoFeed extends DurableObject<CryptoEnv> {
   // without capping the paper accounts the 10-day test is measuring.
   // Nov 27 (Aaron: "as the account grows the max bet would have to grow with it"): LIVE_BET_PCT makes the
   // real-money cap a share of the live account (allocation plus what it has won or lost), so bets grow
-  // as it grows and shrink after a loss. Hard-limited to 10% whatever the setting. LIVE_MAX_BET, when
+  // as it grows and shrink after a loss. Hard-limited to 20% whatever the setting; halved after a loss until 20 straight wins (streakPct). LIVE_MAX_BET, when
   // set, stays a dollar ceiling over it.
   private liveCeiling(equity?: number, streakWins = 0): number | null {
     const base = livePct(this.env.LIVE_BET_PCT);

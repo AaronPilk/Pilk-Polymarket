@@ -350,11 +350,11 @@ test('real money keeps its capped size after one loss while the record still mak
   assert.equal(liveFloorStake({ ...base, available: 2 }), 2);
 });
 
-test('real-money share steps up with a win streak, max 8%, back to base after a loss', () => {
-  assert.equal(streakPct(5, 0), 5);
-  assert.equal(streakPct(5, 19), 5);
-  assert.equal(streakPct(5, 20), 6);
-  assert.equal(streakPct(5, 45), 7);
-  assert.equal(streakPct(5, 200), 8);
-  assert.equal(streakPct(9, 100), 9);
+test('real-money share halves after a loss and comes back after 20 straight wins', () => {
+  assert.equal(streakPct(20, 0), 10);
+  assert.equal(streakPct(20, 19), 10);
+  assert.equal(streakPct(20, 20), 20);
+  assert.equal(streakPct(20, 200), 20);
+  assert.equal(streakPct(20, 3, false), 20);
+  assert.equal(streakPct(5, 0), 2.5);
 });
