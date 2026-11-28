@@ -350,3 +350,13 @@ export function liveFloorStake(o: { stake: number; ceiling: number | null; recor
   if (!(o.recordMean != null && o.recordMean > 0) || o.recordN < LIVE_FLOOR_MIN_BETS) return 0;
   return Math.max(0, Math.min(o.ceiling, o.available, o.openRoom));
 }
+
+// Real money, Nov 27 (Aaron: "if we win big during the night let's raise the risk a little ... but stay
+// strategical"): the bet share steps up 1 point for every STREAK_STEP real wins in a row, from LIVE_BET_PCT
+// up to STREAK_MAX_PCT, and drops straight back to LIVE_BET_PCT on any loss. LIVE_MAX_BET still caps dollars.
+export const STREAK_STEP = 20;
+export const STREAK_MAX_PCT = 8;
+export function streakPct(base: number, winsSinceLoss: number): number {
+  if (!(base > 0) || base >= STREAK_MAX_PCT) return base;
+  return Math.min(STREAK_MAX_PCT, base + Math.floor(Math.max(0, winsSinceLoss) / STREAK_STEP));
+}

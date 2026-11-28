@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_BLEND, blendProb, eventFor, fitBlend, gradeModel, judgingBlend, nextEvent, parseWindow, fairUp, logLoss, learnOffset, selectCheckpoints, windowSlug, type Mark } from '../src/cryptomath.ts';
-import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale, livePct, dailyBet, dailyClearlyRefused, DAILY_MIN_ASK, DAILY_HARD_MAX, liveQuietHour, liveAlloc, liveFloorStake } from '../src/fairvalue.ts';
+import { stakeFor, dailyStopHit, kellyStake, riskLimits, drawdownScale, livePct, dailyBet, dailyClearlyRefused, DAILY_MIN_ASK, DAILY_HARD_MAX, liveQuietHour, liveAlloc, liveFloorStake, streakPct } from '../src/fairvalue.ts';
 
 test('parseWindow reads series, start and end', () => {
   const w = parseWindow('cpc-btc-updown-5m-2026-11-22-1940z')!;
@@ -347,4 +347,13 @@ test('real money keeps its capped size after one loss while the record still mak
   assert.equal(liveFloorStake({ ...base, recordN: 50 }), 0);
   assert.equal(liveFloorStake({ ...base, ceiling: null }), 0);
   assert.equal(liveFloorStake({ ...base, available: 2 }), 2);
+});
+
+test('real-money share steps up with a win streak, max 8%, back to base after a loss', () => {
+  assert.equal(streakPct(5, 0), 5);
+  assert.equal(streakPct(5, 19), 5);
+  assert.equal(streakPct(5, 20), 6);
+  assert.equal(streakPct(5, 45), 7);
+  assert.equal(streakPct(5, 200), 8);
+  assert.equal(streakPct(9, 100), 9);
 });
