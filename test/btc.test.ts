@@ -343,7 +343,8 @@ test('LIVE_ALLOCATION: real-money bank size, Aaron sets it', () => {
 test('real money keeps its capped size after one loss while the record still makes money', () => {
   const base = { stake: 0, ceiling: 5.46, recordMean: 0.0069, recordN: 399, available: 109, openRoom: 30 };
   assert.equal(liveFloorStake(base), 5.46);
-  assert.equal(liveFloorStake({ ...base, stake: 3 }), 3);
+  assert.equal(liveFloorStake({ ...base, stake: 3 }), 5.46);
+  assert.equal(liveFloorStake({ ...base, stake: 9 }), 9);
   assert.equal(liveFloorStake({ ...base, recordMean: -0.001 }), 0);
   assert.equal(liveFloorStake({ ...base, recordN: 50 }), 0);
   assert.equal(liveFloorStake({ ...base, ceiling: null }), 0);

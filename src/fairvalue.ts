@@ -345,10 +345,11 @@ export const LIVE_FLOOR_MIN_BETS = 100;
 export const LIVE_LOSSES_PER_DAY = 2;
 export function liveFloorStake(o: { stake: number; ceiling: number | null; recordMean: number | null; recordN: number;
   available: number; openRoom: number }): number {
-  if (o.stake > 0) return o.stake;
-  if (o.ceiling == null || !(o.ceiling > 0)) return 0;
-  if (!(o.recordMean != null && o.recordMean > 0) || o.recordN < LIVE_FLOOR_MIN_BETS) return 0;
-  return Math.max(0, Math.min(o.ceiling, o.available, o.openRoom));
+  // Nov 28 12:40 AM: the floor is a floor, not a fallback. A record share just above zero sized a real bet at
+  // $0.98 under a $13 cap, so now the record-sized stake is lifted to the share whenever the record makes money.
+  if (o.ceiling == null || !(o.ceiling > 0)) return Math.max(0, o.stake);
+  if (!(o.recordMean != null && o.recordMean > 0) || o.recordN < LIVE_FLOOR_MIN_BETS) return Math.max(0, o.stake);
+  return Math.max(o.stake, 0, Math.min(o.ceiling, o.available, o.openRoom));
 }
 
 // Real money, Nov 27 11:15 PM ET (Aaron picked "step-down after a loss" for 20% sizing): after any real
